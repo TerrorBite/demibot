@@ -149,12 +149,12 @@ class IRCConnection(object):
         if self.socket is not None:
             # Check results of previous ping (if any)
             if self.ping is not None:
-                self.socket.send(IRCMessage(self.encoder, None, u'QUIT', ("No ping response for 2 minutes",)))
+                self.socket.send_now(IRCMessage(self.encoder, None, u'QUIT', ("No ping response for 2 minutes",)))
                 self.reconnect()
                 return
             # Now send the next ping
             self.ping = self.get_random()
-            self.socket.send(IRCMessage(self.encoder, None, u'PING', (self.ping,)))
+            self.socket.send_now(IRCMessage(self.encoder, None, u'PING', (self.ping,)))
         elif self.ping_task:
             # If there is no connection, cancel ping task
             self.ping_task.cancel()
@@ -163,8 +163,9 @@ class IRCConnection(object):
         """
         Returns immediately. Will attempt to initiate a connection to the IRC server,
         retrying until successful or a certain number of tries has been exceeded.
-        Will try multiple addresses if provided. When connected, it sends NICK and
-        USER commands (and PASS, if needed) to log in to the server.
+        Will try multiple addresses if provided. Returns after successfully
+        initiating connection without waiting for the connection to actually
+        complete successfully.
 
         Internally, this function works as follows:
 
@@ -351,6 +352,7 @@ class IRCConnection(object):
             return
         # Filter out PONG messages that are in response to our own PINGs and don't notify downstream
         elif msgtype=='PONG' and self.ping in params:
+            # we aren't too picky about which param contains the ping token as long as it's there
             self.ping = None
             return
 
