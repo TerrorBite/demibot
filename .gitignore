@@ -1,0 +1,15 @@
+# don't reveal testing config files (they contain passwords)
+networks/*.yml
+# logs may also contain sensitive data
+*.log
+
+# dev stuff
+*.txt
+backup.sh
+
+# No python bytecode, only source
+*.pyc
+
+# vim files
+.*.swp
+*~

@@ -1,0 +1,6 @@
+!BotConfig
+debug: true
+plugin_blacklist: []
+throttle:
+    rate: 10.0
+    per: 6.0
