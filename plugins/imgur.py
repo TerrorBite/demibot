@@ -3,7 +3,7 @@ import urllib
 import urllib2
 import re
 
-re_imgur = re.compile(r'imgur\.com/([A-Za-z0-9]+)')
+re_imgur = re.compile(r'imgur\.com/(?:gallery/)?([A-Za-z0-9]+)')
 
 from ircstack.dispatch.events import ChannelMessageEvent, event_handler
 from ircstack.util import get_logger

@@ -449,10 +449,11 @@ class IRCMessage(object):
     Encapsulates a raw IRC protocol message.
     """
     def __init__(self, encoder, prefix, command, params, seq=None, conn=None):
-        self.prefix=prefix
-        self.command=command
-        self.params = filter(len, params) # eliminate empty strings 
-        self.encoder=encoder
+        self.prefix = prefix
+        self.command = command
+        self.params = params
+
+        self.encoder = encoder
         self.conn = conn
 
         self.seq=seq # sequence number for debugging
@@ -462,32 +463,45 @@ class IRCMessage(object):
 
     def __str__(self):
         "Return a raw IRC message, encoded to bytes for network transmission."
-        text = u':%s %s' % (self.prefix, self.command) if self.prefix else self.command
+        text = self.encoder.encode_server( (u':%s %s' % (self.prefix, self.command)) if self.prefix else self.command )
         if self.params:
-            self.params = list(filter(len, self.params))
-            text += u' '.join(['']+self.params[:-1])
-            message = self.encoder.encode_utf8(self.params[-1])
-            return '%s %s%s' % (self.encoder.encode_server(text), ':' if ' ' in message else '',  message)
-        return self.encoder.encode_server(text)
+            # Coerce to unicode and eliminate empty strings
+            params = filter(len, map(unicode, self.params))
+            text += u' '.join([u'']+params[:-1])
+            message = self.encoder.encode_utf8(params[-1])
+            text = '{0} {1}{2}'.format(text, ':' if ' ' in message else '', message)
+        return text.translate(None, '\0\r\n')
 
     def __unicode__(self):
         "Return a unicode string representation of the raw IRC message."
         text = u':%s %s' % (self.prefix, self.command) if self.prefix else self.command
         if self.params:
-            self.params = list(filter(len, self.params))
-            text += u' '.join(['']+self.params[:-1])
-            message = self.params[-1]
-            return u'%s %s%s' % (text, u':' if u' ' in message else u'', message)
-        return text
+            params = filter(len, map(unicode, self.params))
+            text += u' '.join([u'']+params[:-1])
+            message = params[-1]
+            text = u'%s %s%s' % (text, u':' if u' ' in message else u'', message)
+        return text.translate({u'\0': None, u'\r': None, u'\n': None})
 
     def __add__(self, other):
-        "An IRCMessage will act like its string representation when a string is added to it."
+        """
+        An IRCMessage will act like its network-encoded string representation when
+        a string is appended to it using the addition operator,
+        or like its unicode representation when a unicode string is appended.
+        """
         # Act like a string when added (e.g. for: msg + '\r\n')
+        if isinstance(other, unicode):
+            return self.__unicode__() + other
         return self.__str__() + other
 
     def __radd__(self, other):
-        "An IRCMessage will act like its string representation when added to a string."
+        """
+        An IRCMessage will act like its network-encoded string representation when
+        appended to a string using the addition operator,
+        or like its unicode represenation when appended to a unicode string.
+        """
         # Act like a string when added
+        if isinstance(other, unicode):
+            return other + self.__unicode__()
         return other + self.__str__()
     
     @property
@@ -504,7 +518,7 @@ class IRCMessage(object):
     def send(self, prio=1):
         """
         Sends this message to the IRC server, as long as an IRCConnection was defined
-        when this IRCMessage was created.
+        when this IRCMessage was created. This is largely a convenience function.
         """
         if self.conn:
             self.conn.send(str(self), prio)
@@ -515,40 +529,63 @@ class LongIRCMessage(IRCMessage):
 
     This is achieved by splitting the final parameter and prepending everything preceding that final
     parameter onto each part. This is generally only suitable for PRIVMSG and NOTICE commands. 
+
+    Note that one must use the send() method of a LongIRCMessage object in order to perform splitting.
     """
     def send(self, prio=1):
+        """
+        Sends this message to the IRC server, as long as an IRCConnection was defined
+        when this IRCMessage was created. A message of excessive length will have its
+        final parameter split and sent as several messages. Subsequent messages will
+        duplicate all but the final parameter of the initial message;
+        """
         if not self.conn: return
 
+        # Get the entire message (encoded) and the length of it
         strmsg = str(self)
         total = len(strmsg)
+
         if total > 510:
-            # Message is too long and will be truncated. Split it up.
-            msg = self.encoder.encode_utf8(self.message)
-            prefixlen = total - len(msg)
+            # Message is too long and will be truncated.
+
+            # can't do any splitting if there are no parameters
+            if not self.params: return self.conn.send(strmsg, prio)
+
+            # Get the final param (encoded) by itself
+            finalparam = self.encoder.encode_utf8(self.message)
+
+            # Calculate length of non-message part
+            prefixlen = total - len(finalparam)
             if prefixlen > 500:
                 # not much we can do here
                 return self.conn.send(strmsg, prio)
+
+            # "prefix" consists of everything except the final parameter
             prefix = strmsg[:prefixlen]
+
+            # Work out how far into "finalparam" we need to split
             cutoff = 508-prefixlen # leave some leeway
 
-            messages = []
-            remaining = msg
-            while len(remaining) > cutoff:
+            messages = [] # this will hold the split-up final params to send
+            while len(finalparam) > cutoff:
                 # Search for a space to wrap at
-                index = remaining.rfind(' ', 0, cutoff)
+                index = finalparam.rfind(' ', 0, cutoff)
 
                 # If there was no space found close enough to the cutoff point,
                 # just cut at the cutoff point
                 if cutoff-index > 32:index=cutoff
 
                 # Split on the space
-                split, remaining = remaining[:index], remaining[index:].lstrip(' ')
-
+                split, finalparam = finalparam[:index], finalparam[index:].lstrip(' ')
+                
+                # Add split-off message to the list.
                 # If this looks like an unterminated CTCP, terminate it (fixes long /me)
                 messages.append(split+'\001' if bool(split.count('\001')&1) else split)
-            messages.append(remaining)
+            # Add what's left to the list
+            messages.append(finalparam)
 
             for m in messages:
+                # Send each part of the message, applying the prefix
                 self.conn.send(prefix+m, prio)
 
 
@@ -600,14 +637,14 @@ class IRCEncoder(object):
             return text.decode(self.fallback, errors='replace')
 
     def encode_server(self, text):
-        return text.encode(self.server, errors='replace')
+        return str(text.encode(self.server, errors='replace'))
 
     def encode_utf8(self, text):
         # Encode outgoing message correctly
         if self.utf8:
-            return text.encode('utf-8', errors='replace')
+            return str(text.encode('utf-8', errors='replace'))
         else:
-            return text.encode(self.fallback, errors='replace')
+            return str(text.encode(self.fallback, errors='replace'))
 
 # ircstack.network.irc
 class NoValidAddressError(Exception):
