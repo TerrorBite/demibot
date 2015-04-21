@@ -10,7 +10,9 @@ def strlist(l, final='and', conv=str):
     return (' %s ' % final).join(filter(len, (', '.join(l[:-1]), l[-1])))
 
 def makedict(value):
-    return {b[0]:b[1] or None for b in [a.split(':') for a in value.split(',')]}
+    # Python 2.6 doesn't support dict comprehensions
+    #return {b[0]:b[1] or None for b in [a.split(':') for a in value.split(',')]}
+    return dict((b[0], b[1] or None) for b in [a.split(':') for a in value.split(',')])
 
 class Desc(object):
     def __init__(self, default=None, doc=None):

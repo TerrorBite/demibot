@@ -323,4 +323,3 @@ def set_thread_name(func):
         _set_proc_name(threading.current_thread().name)
         func(*args, **kwargs)
     return wrapper
-

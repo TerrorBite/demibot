@@ -48,6 +48,8 @@ class LineBufferedSocket(socket.socket):
         self.address = None
         self.error = None
 
+        self.use_ssl = use_ssl
+
         # In order to be helpful to higher-level code, store a reference to
         # some optional "parent" object. We don't use it or care what it is.
         self.parent = parent
@@ -56,11 +58,19 @@ class LineBufferedSocket(socket.socket):
         self._readlock = threading.RLock()
         self._writelock = threading.RLock()
         
+        if use_ssl:
+            # Wrap a new, basic socket in an SSL layer
+            wrapper = ssl.wrap_socket(socket.socket(family=family, type=socket.SOCK_STREAM), ssl_version=ssl.PROTOCOL_TLSv1)
+
+            # Workaround for unimplemented connect_ex function in 2.6
+            if not hasattr(ssl.SSLSocket, '_real_connect'):
+                setattr(wrapper, '_sslobj', ssl._ssl.sslwrap(wrapper._sock, False,
+                    None, None, ssl.CERT_NONE, ssl.PROTOCOL_TLSv1, None))
+
         super(LineBufferedSocket, self).__init__(family=family, type=socket.SOCK_STREAM, 
-                # If using SSL, wrap another socket in an SSL layer and tell base class to use the
-                # wrapped socket internally. The SSL layer should be almost completely transparent to us.
-                _sock=ssl.wrap_socket(socket.socket(family=family, type=socket.SOCK_STREAM),
-                    ssl_version=ssl.PROTOCOL_TLSv1) if use_ssl else None
+                # If using SSL, tell base class to use the wrapped socket internally.
+                # The SSL layer should be almost completely transparent to us.
+                _sock=wrapper if use_ssl else None
                 )
 
         # After this point the following methods will directly reference
@@ -77,33 +87,36 @@ class LineBufferedSocket(socket.socket):
         self.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, True)
         self.setblocking(False)
 
+
     #def close(self):
     #    super(LineBufferedSocket, self).close() 
 
     def connect(self, address):
-        with self._readlock, self._writelock:
-            self.address = address
-            self.log.info('Opening connection to %s:%d' % address)
-            # Call base class connect
-            result = super(LineBufferedSocket, self).connect_ex(address)
-            if result==errno.EINPROGRESS:
-                # This is normal (because we're nonblocking)
-                return True
-            elif result!=0:
-                self.error = socket.error(result, os.strerror(result))
-                self.log.error('Error trying to connect: %s' % str(self.error))
-                # Take appropriate action?
-                return False
-            else:
-                # we might end up here if the socket connected fast enough
-                self.log.debug("Connected immediately %s" % self)
-                return True
+        with self._readlock:
+            with self._writelock:
+                self.address = address
+                self.log.info('Opening connection to %s:%d' % address)
+                # Call base class connect
+                result = super(LineBufferedSocket, self).connect_ex(address)
+                if result==errno.EINPROGRESS:
+                    # This is normal (because we're nonblocking)
+                    return True
+                elif result!=0:
+                    self.error = socket.error(result, os.strerror(result))
+                    self.log.error('Error trying to connect: %s' % str(self.error))
+                    # Take appropriate action?
+                    return False
+                else:
+                    # we might end up here if the socket connected fast enough
+                    self.log.debug("Connected immediately %s" % self)
+                    return True
 
     def connect_ex(self, address):
         """See socket.connect_ex"""
-        with self._readlock, self._writelock:
-            self.address = address
-            return super(LineBufferedSocket, self).connect_ex(address)
+        with self._readlock:
+            with self._writelock:
+                self.address = address
+                return super(LineBufferedSocket, self).connect_ex(address)
     
     def __repr__(self):
         return hrepr(self)
@@ -113,13 +126,14 @@ class LineBufferedSocket(socket.socket):
         A higher-level method for disconnecting the socket cleanly.
         This does not close the socket; you still need to manually call close().
         """
-        with self._readlock, self._writelock:
-            try:
-                self.shutdown(2) # SHUT_RDWR, using constant in case of calling from destructor
-                self._cleanup()
-            except socket.error as msg:
-                if msg[0]==errno.ENOTCONN:
-                    self.log.debug("%s was already disconnected in disconnect()" % repr(self))
+        with self._readlock:
+            with self._writelock:
+                try:
+                    self.shutdown(2) # SHUT_RDWR, using constant in case of calling from destructor
+                    self._cleanup()
+                except socket.error as msg:
+                    if msg[0]==errno.ENOTCONN:
+                        self.log.debug("%s was already disconnected in disconnect()" % repr(self))
 
     def _recv(self):
         """
@@ -175,10 +189,10 @@ class LineBufferedSocket(socket.socket):
 
     def _cleanup(self, error=None):
         """Internal: Called immediately when the connection dies"""
-        with self._readlock, self._writelock:
-            self.error = error
-            # Call on_dead handler
-            self.on_dead()
+        # Don't bother locking here, as socket is already dead
+        self.error = error
+        # Call on_dead handler
+        self.on_dead()
     
     def on_dead(self):
         """
@@ -275,18 +289,21 @@ class LineBufferedSocket(socket.socket):
         if isinstance(self._sock, ssl.SSLSocket): return
 
         # lock while doing this
-        with self._readlock, self._writelock:
+        with self._readlock:
+            with self._writelock:
+                self._wrap_ssl()
+                self.resume()
 
-            # Wrap our existing socket in SSL
-            self.setblocking(True)
-            self._sock=ssl.wrap_socket(self.dup())
-            self.setblocking(False)
+    def _wrap_ssl(self):
+        # Wrap our existing socket in SSL
+        self.setblocking(True)
+        self._sock=ssl.wrap_socket(self.dup())
+        self.setblocking(False)
 
-            # Reassign methods (except send())
-            for method in ssl._delegate_methods:
-                if method != 'send': # already ours
-                    setattr(self, method, getattr(self._sock, method))
-            self.resume()
+        # Reassign methods (except send())
+        for method in ssl._delegate_methods:
+            if method != 'send': # already ours
+                setattr(self, method, getattr(self._sock, method))
 
 
 # ircstack.network.sockets

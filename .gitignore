@@ -6,6 +6,7 @@ networks/*.yml
 # dev stuff
 *.txt
 backup.sh
+.python-version
 
 # No python bytecode, only source
 *.pyc

@@ -107,8 +107,6 @@ class IRCConnection(object):
 
         # This will hold IP addresses after DNS lookup
         self.addresses = itertools.cycle([])
-        #log.debug(ip4list)
-        #log.debug(ip6list)
 
     def get_random(self):
         """Gets a random hexadecimal string suitable for sending in a PING message."""
@@ -130,8 +128,13 @@ class IRCConnection(object):
                 else:
                     self.log.error('Unknown error %d resolving %s: %s' % e[0], server.host, e[1])
             else:
-                ip4list += {tuple(x[4]) for x in addrinfo if x[0]==socket.AF_INET}
-                ip6list += {tuple(x[4][:2]) for x in addrinfo if x[0]==socket.AF_INET6}
+                # Python 2.6 doesn't support dict comprehensions
+                #ip4list += {tuple(x[4]) for x in addrinfo if x[0]==socket.AF_INET}
+                #ip6list += {tuple(x[4][:2]) for x in addrinfo if x[0]==socket.AF_INET6}
+                ip4list += [tuple(x[4]) for x in addrinfo if x[0]==socket.AF_INET]
+                ip6list += [tuple(x[4][:2]) for x in addrinfo if x[0]==socket.AF_INET6]
+                log.debug(ip4list)
+                log.debug(ip6list)
 
         if not ip6list and not ip4list: 
             self.log.error('Failed to create IRCConnection: No valid addresses supplied')
@@ -222,7 +225,7 @@ class IRCConnection(object):
                         # jump to top to fetch first address
                         continue
 
-        self.log.debug("Address acquired, creating socket")
+        self.log.debug("Address acquired, creating socket: " + repr(self.current_addr))
         self.socket = SendThrottledSocket(socket.AF_INET6 if ':' in self.current_addr[0] else socket.AF_INET, parent=self, use_ssl=self.current_server.ssl)
 
         if not self.socket.connect(self.current_addr):
@@ -623,7 +626,7 @@ class IRCEncoder(object):
         Attempt to decode the given text as a fixed encoding (usually iso-8859-1)
         Used for decoding server messages, which are normally in a standard 8-bit encoding.
         """
-        return text.decode(self.server, errors='replace')
+        return text.decode(self.server, 'replace')
 
     def decode_utf8(self, text):
         """
@@ -632,19 +635,19 @@ class IRCEncoder(object):
         sent as final command parameter after the delimiting ':' character).
         """
         try:
-            return text.decode('utf-8', errors='strict') if self.utf8 else text.decode(self.fallback, errors='replace')
+            return text.decode('utf-8', 'strict') if self.utf8 else text.decode(self.fallback, errors='replace')
         except UnicodeDecodeError:
-            return text.decode(self.fallback, errors='replace')
+            return text.decode(self.fallback, 'replace')
 
     def encode_server(self, text):
-        return str(text.encode(self.server, errors='replace'))
+        return str(text.encode(self.server, 'replace'))
 
     def encode_utf8(self, text):
         # Encode outgoing message correctly
         if self.utf8:
-            return str(text.encode('utf-8', errors='replace'))
+            return str(text.encode('utf-8', 'replace'))
         else:
-            return str(text.encode(self.fallback, errors='replace'))
+            return str(text.encode(self.fallback, 'replace'))
 
 # ircstack.network.irc
 class NoValidAddressError(Exception):

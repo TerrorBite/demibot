@@ -113,5 +113,7 @@ class ConsoleHandler(logging.StreamHandler):
             self.flush()
         except (KeyboardInterrupt, SystemExit):
             raise
+        except TypeError:
+            return
         except:
             self.handleError(record)
