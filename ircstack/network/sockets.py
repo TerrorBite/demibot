@@ -145,7 +145,7 @@ class LineBufferedSocket(socket.socket):
             data = ''
             try:
                 data = self._recvbuf + self._sock.recv(4096)
-                self.netlog.info('%s >>> %s' % (self.address, repr(data)))
+                #self.netlog.info('%s >>> %s' % (self.address, repr(data)))
             except ssl.SSLError as e:
                 if e[0] == ssl.SSL_ERROR_WANT_READ:
                     # The SSL layer needs us to call read() again before it can return
@@ -243,8 +243,7 @@ class LineBufferedSocket(socket.socket):
             #self.log.debug("_send() %s %s" % (repr(self), repr(data)))
             try:
                 l = self._sock.send(data)
-                # log it
-                self.netlog.info('%s <<< %s' % (self.address, repr(data[:l])))
+                #self.netlog.info('%s <<< %s' % (self.address, repr(data[:l]))) # log it
                 if l < len(data):
                     self.log.warn("Not all data could be sent, trying again")
                     self._sendbuf = data[l:]
