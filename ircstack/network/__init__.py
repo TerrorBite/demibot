@@ -86,6 +86,9 @@ class IRCConnection(object):
 
         self.socket = None
         self.network = network
+
+        # Used to indicate whether the connection is SSL secured
+        self.ssl = False
         # Use the provided encoder, or create a sane one if it is omitted
         self.encoder = encoder if encoder else IRCEncoder('iso-8859-1')
 
@@ -227,6 +230,8 @@ class IRCConnection(object):
 
         self.log.debug("Address acquired, creating socket: " + repr(self.current_addr))
         self.socket = SendThrottledSocket(socket.AF_INET6 if ':' in self.current_addr[0] else socket.AF_INET, parent=self, use_ssl=self.current_server.ssl)
+        # record SSL status
+        self.ssl = self.current_server.ssl
 
         if not self.socket.connect(self.current_addr):
             log.info("Error connecting to %s: %s" % (self.current_addr, self.socket.error))
@@ -265,13 +270,17 @@ class IRCConnection(object):
         self.connect()
 
     def starttls_begin(self):
+        # Send STARTTLS command to server and suspend further writes
         self.socket.suspend('STARTTLS\r\n')
 
     def starttls_abort(self):
+        # Resume writes
         self.socket.resume()
 
     def starttls_complete(self):
+        # initiate SSL handshake and switch socket to SSL mode
         self.socket.starttls()
+        self.ssl = True
 
     def on_connected(self):
         """
