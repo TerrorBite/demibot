@@ -6,7 +6,7 @@ log = get_logger(__name__)
 
 @event_handler(ConsoleCommandEvent)
 def on_command(event):
-    #if log: log.debug('Got ConsoleCommandEvent with params: %s' % repr(event.params))
+    if log: log.debug('2. Got ConsoleCommandEvent with params: %s' % repr(event.params))
     if len(event.params) < 2: return
 
     if event.params[0] in IRCBot().networks:

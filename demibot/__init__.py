@@ -1,3 +1,7 @@
+"""
+The demibot package contains modules and classes for running an IRCStack-based
+bot. It handles plugins, configuration and local user interface.
+"""
 from __future__ import absolute_import
 
 import sys
@@ -19,7 +23,7 @@ log = get_logger()
 
 from ircstack.dispatch import Dispatcher
 from ircstack.dispatch.events import EventListener, event_handler
-from ircstack.dispatch.async import DelayedTask
+from ircstack.dispatch.async import SyncDelayed
 import ircstack.dispatch.events as events
 from ircstack.network import IRCSocketManager, NoValidAddressError
 from ircstack.protocol.irc import IRCNetwork
@@ -33,11 +37,14 @@ __all__ = ["IRCBot"]
 
 class IRCBot(Singleton, EventListener):
     """
-    Demibot main class.
+    The DemiBot application.
 
     This class implements the Demibot IRC bot. Call the run() method to execute it.
-    By default, the bot presents an interactive console, allowing it to be controlled
-    using commands.
+    
+    Note that IRCBot runs as an interactive frontend, presenting a readline-enabled command
+    line interface, allowing it to be controlled using commands. For this reason, IRCBot is
+    a singleton. Attempting to instantiate it more than once will return the existing instance
+    instead of a new one.
     """
     log = get_logger()
 
@@ -108,6 +115,7 @@ class IRCBot(Singleton, EventListener):
             self.shutdown()
         finally:
             console.teardown()
+            pass
 
     @event_handler(events.WelcomeEvent)
     def on_welcome(self, event):
@@ -188,10 +196,8 @@ class IRCBot(Singleton, EventListener):
 
     def shutdown(self):
         self.log.info('Shutting down IRCBot...')
-        Dispatcher.stop()
-        IRCSocketManager.stop()
-        # Wait briefly on the SocketManager to shut down cleanly
-        # (else it will run during interpreter shutdown and crash)
-        IRCSocketManager.thread.join(0.2)
+        IRCSocketManager.shutdown()
+        Dispatcher.shutdown()
+        self.log.info('Shutdown complete.')
 
 log.debug("IRCBot initialized, loading complete.")

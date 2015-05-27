@@ -25,10 +25,17 @@ cols, rows = get_window_size()
 
 def setup():
     global cols, rows, active
-    active = True
     cols, rows = get_window_size()
     with stdoutlock:
-        sys.stdout.write("\033[1;%dr\033[?6l\033[?7;25h\033[%d;0f" % (cols-1, cols))
+        # [1;25r -Enable scroll area
+        # [?6l  -???
+        # [?7;25h -
+        sys.stdout.write("\033[1;{0}r\033[?6l\033[?7;25h\033[{1};0f".format(cols-1, cols))
+    active = True
+
+def winch():
+    with stdoutlock:
+        sys.stdout.write("\033[1;{}r".format(cols-1))
 
 def teardown():
     global active
@@ -57,7 +64,7 @@ def run():
             IRCBot().quit_networks('Got Ctrl-C')
             break
         except SystemExit, e:
-            IRCBot().quit_networks(e.message)
+            IRCBot().quit_networks(unicode(e))
             break
         except Exception:
             log.error("Exception occurred in console handler", exc_info=1)

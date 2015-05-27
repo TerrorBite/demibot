@@ -20,7 +20,7 @@ log = get_logger(__name__)
 
 # ircstack imports
 from ircstack.util import hrepr
-from ircstack.dispatch.async import DelayedTask, RepeatingTask
+from ircstack.dispatch.async import AsyncDelayed, SyncRepeating, Sync
 import ircstack.dispatch.events as events
 from ircstack.network import IRCSocketManager
 from ircstack.network.sockets import SendThrottledSocket
@@ -31,7 +31,7 @@ reline = re.compile(r'(?::([^ ]+) )?([^ ]+)(?: (.*))?$')
 # ircstack.network.irc
 class IRCConnection(object):
     """
-    Represents and handles a connection to an IRC network.
+    Represents and handles a connection to an IRC server.
 
     It is responsible for creating a socket and connecting it to an IRC server on
     the network. It is responsible for retrying the connection until it succeeds.
@@ -84,32 +84,37 @@ class IRCConnection(object):
         self.log =  get_logger(self.__class__.__name__)
         self.log.debug("Created %s on %s" % (repr(self), repr(network)))
 
+        #: Stores the socket that this IRCConnection uses to communicate with an IRC server.
         self.socket = None
+        #: Stores our parent network, so we can make callbacks.
         self.network = network
 
-        # Used to indicate whether the connection is SSL secured
+        #: Uses the Dispatcher to route messages to our parent network.
+        self.dispatch = Sync(network.on_received)
+
+        #: Indicates whether the connection is SSL secured.
         self.ssl = False
         # Use the provided encoder, or create a sane one if it is omitted
         self.encoder = encoder if encoder else IRCEncoder('iso-8859-1')
 
         self.sequence = 0 # sequence numbers
         
-        self.ping = None # used for ping timeout detection
-        self.ping_task = None
-        self.random = random.Random() # generates random values for pings
+        self.ping = None # Stores the ping value sent to the server.
+        self.ping_task = None # Stores the ping timeout task so it can be cancelled
+        self.random = random.Random() # Generates random values for pings
+
+        self.conn_task = None
 
 
-        #ip4list, ip6list = self.dns_lookup(serverlist)
+        # TODO: Configurable option to select IPv6 only / IPv4 only / IPv6 preferred / IPv4 preferre
+        self.prefer_ipv4 = False #: Sets whether IPv4 should be preferred instead of IPv6.
+        self.only_preferred = False # Sets whether the protocol selected by "prefer_ipv4" should be forced.
 
-        # TODO: Configurable option to select IPv6 only / IPv4 only / IPv6 preferred / IPv4 preferred
-        self.prefer_ipv4 = False
-        self.only_preferred = False
+        #: A generator that provides the next configured server.
+        self.servers = (x for x in serverlist) # itertools.cycle(serverlist)
 
-        # For now, just pass in hostnames
-        self.servers = itertools.cycle(serverlist)
-
-        # This will hold IP addresses after DNS lookup
-        self.addresses = itertools.cycle([])
+        #: A generator that provides the next address in line.
+        self.addresses = (x for x in ())
 
     def get_random(self):
         """Gets a random hexadecimal string suitable for sending in a PING message."""
@@ -136,12 +141,14 @@ class IRCConnection(object):
                 #ip6list += {tuple(x[4][:2]) for x in addrinfo if x[0]==socket.AF_INET6}
                 ip4list += [tuple(x[4]) for x in addrinfo if x[0]==socket.AF_INET]
                 ip6list += [tuple(x[4][:2]) for x in addrinfo if x[0]==socket.AF_INET6]
-                log.debug(ip4list)
-                log.debug(ip6list)
+        
+        # Dedup lists
+        ip4list, ip6list = dict(ip4list).items(), dict(ip6list).items()
+        log.debug("IPv4 addresses: "+repr(ip4list))
+        log.debug("IPv6 addresses: "+repr(ip6list))
 
         if not ip6list and not ip4list: 
             self.log.error('Failed to create IRCConnection: No valid addresses supplied')
-            raise NoValidAddressError('No valid addresses supplied')
 
         return ip4list, ip6list
 
@@ -165,7 +172,7 @@ class IRCConnection(object):
             # If there is no connection, cancel ping task
             self.ping_task.cancel()
 
-    def connect(self, force_ipv4=False):
+    def connect(self, force_ipv4=False, depth=0):
         """
         Returns immediately. Will attempt to initiate a connection to the IRC server,
         retrying until successful or a certain number of tries has been exceeded.
@@ -200,19 +207,19 @@ class IRCConnection(object):
                 except StopIteration:
                     self.log.error('Connection request failed: No more servers to connect to')
                     self.socket = None
-                    return
+                    raise NoValidAddressError('No valid addresses supplied')
                 else:
                     # Is this server already an IPv4 address?
                     try:
                         socket.inet_pton(socket.AF_INET, self.current_server.host)
-                        self.addresses = itertools.cycle([self.current_server.address])
+                        self.addresses = (x for x in [self.current_server.address])
                         continue
                     except socket.error:
                         # it isn't IPv4. It might be IPv6
                         if not force_ipv4:
                             try:
                                 socket.inet_pton(socket.AF_INET, self.current_server.host)
-                                self.addresses = itertools.cycle([self.current_server.address])
+                                self.addresses = (x for x in [self.current_server.address])
                                 continue
                             except socket.error:
                                 pass
@@ -220,11 +227,11 @@ class IRCConnection(object):
                         # It's not an IP address, do a DNS lookup
                         ip4list, ip6list = self.dns_lookup([self.current_server])
                         if force_ipv4:
-                            self.addresses = itertools.cycle(ip4list)
+                            self.addresses = (x for x in ip4list)
                         elif self.only_preferred:
-                            self.addresses = itertools.cycle(ip4list) if self.prefer_ipv4 else itertools.cycle(ip6list)
+                            self.addresses = (x for x in ip4list) if self.prefer_ipv4 else (x for x in ip6list)
                         else:
-                            self.addresses = itertools.cycle(ip4list+ip6list) if self.prefer_ipv4 else itertools.cycle(ip6list+ip4list)
+                            self.addresses = (x for x in ip4list+ip6list) if self.prefer_ipv4 else (x for x in ip6list+ip4list)
                         # jump to top to fetch first address
                         continue
 
@@ -235,16 +242,19 @@ class IRCConnection(object):
 
         if not self.socket.connect(self.current_addr):
             log.info("Error connecting to %s: %s" % (self.current_addr, self.socket.error))
+            log.info("Retrying connection in 2 seconds")
             # Connection attempt failed. Try next address
             # Recursive call until either connected, or no more addresses
-            return self.connect()
+            self.conn_task = AsyncDelayed(self.connect, 2)(force_ipv4=force_ipv4)
+            self.socket = None
+            return
         else:
             # Register our connected socket with the socket manager
             IRCSocketManager.register(self.socket)
             self.log.debug("%s successfully began connection to %s" % (repr(self), self.current_addr))
 
         # Start task to ping server every 3 minutes
-        self.ping_task = RepeatingTask(self.send_ping, 180)()
+        self.ping_task = SyncRepeating(self.send_ping, 180)()
         
         #assert self.socket is not None
 
@@ -257,6 +267,7 @@ class IRCConnection(object):
         close the connection for us.
         """
         if self.ping_task: self.ping_task.cancel()
+        if self.conn_task: self.conn_task.cancel()
         if self.socket:
             self.socket.disconnect()
             self.socket = None
@@ -298,7 +309,7 @@ class IRCConnection(object):
         """
         self.log.info('Failed to connect to %s with error %s, will retry in 10 seconds' % (self.current_addr, self.socket.error))
         # Retry with a new address after 10 seconds
-        DelayedTask(self.connect, 10)()
+        AsyncDelayed(self.connect, 10)()
 
     def on_error(self):
         """
@@ -309,7 +320,7 @@ class IRCConnection(object):
         # TODO: Inform upstream Network of error
         if self.network: self.network.on_disconnected()
         self.socket = None
-        DelayedTask(self.connect, 10)()
+        AsyncDelayed(self.connect, 10)()
 
     def on_hangup(self):
         """
@@ -321,7 +332,7 @@ class IRCConnection(object):
         self.log.info('%s has disconnected us.' % (self.current_addr[0],))
         if self.network: self.network.on_disconnected()
         self.socket = None
-        DelayedTask(self.connect, 10)()
+        AsyncDelayed(self.connect, 10)()
 
     def on_received(self):
         """
@@ -332,10 +343,13 @@ class IRCConnection(object):
                 # Obtain an IRCMessage representation of this line
                 msg = self.process(line)
 
-                # Send this message to the Dispatcher (via our parent IRCNetwork) for further processing
+                # Send this message to our parent IRCNetwork (via the Dispatcher) for further processing
                 # This moves processing to another thread ASAP so the SocketManager is not interrupted
                 if self.network and msg:
-                    events.MessageReceivedEvent(self.network, msg).dispatch()
+                    # Get rid of the MessageReceivedEvent and all its IRCNetwork special-casing
+                    # in favor of the much simpler Sync method:
+                    self.dispatch(msg)
+                    #events.MessageReceivedEvent(self.network, msg).dispatch()
         else:
             self.log.debug("WARNING: on_received() called when socket was None!")
 

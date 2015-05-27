@@ -1,3 +1,7 @@
+"""
+This module implements the plugin loading and unloading functionality of DemiBot.
+"""
+
 # Python imports
 import os, sys, traceback, imp, weakref
 import time
@@ -6,28 +10,37 @@ import time
 from ircstack.util import get_logger
 log = get_logger(__name__)
 
-# Bottle imports
+# ircstack imports
 from ircstack.dispatch.async import Dispatcher, Async
-# (none)
+from ircstack.dispatch.events import PluginUnloadEvent, event_handler
 
-# A dict of Plugin instances
+#: A dict of currently loaded Plugin instances, keyed by plugin name.
 plugins = {}
+
+#: A list of weak references. Currently unused.
 weakrefs = []
 
 class PluginUnloadMonitor(object):
+    """
+    This class is used to monitor for a plugin being unloaded, which it does
+    by executing code in its __del__ method. Currently it only prints a log message.
+    """
     def __init__(self, name, when):
         self.name = name
         self.when = when
-    def __del__(self, log=log):
+    def __del__(self):
         # early-binding log to a local so we don't reference globals in __del__
         try:
-            log.info("Plugin %s (loaded at %s) unloaded successfully" % (self.name, self.when))
+            asctime = time.asctime(time.localtime(self.when))
+            PluginUnloadEvent("Plugin %s (loaded at %s) unloaded successfully" % (self.name, asctime)).dispatch()
         except:
             # If the interpreter is shutting down, then we may not be able to use logging
             pass
 
-def _get_module(name):
-    "Internal: Imports and returns a plugin module. Raises ImportError if not found"
+def _import_module(name):
+    """
+    Internal: Imports and returns a plugin module. Raises ImportError if not found.
+    """
     f, filename, data = imp.find_module(name, ['plugins'])
     try:
         module = imp.load_module(name, f, filename, data)
@@ -35,8 +48,14 @@ def _get_module(name):
         f.close()
     return module
 
+
 class Plugin(object):
-    "Represents a plugin that is loaded into the PluginLoader."
+    """
+    Represents a plugin that is loaded into the PluginLoader.
+    
+    Note that the Plugin class is not the plugin module itself; that is accessed
+    via the Plugin.module attribute.
+    """
 
     def __init__(self, name):
         log.debug("Loading plugin %s..." % name)
@@ -47,6 +66,9 @@ class Plugin(object):
         # Maintain a list of event subscriptions
         self.subscriptions = {}
 
+        #: List of networks for which this plugin is enabled
+        self.enabled_networks = []
+
         global plugins
         plugins[name] = self
 
@@ -56,10 +78,10 @@ class Plugin(object):
         """Internal: Attempt to load (and return) the given module. Called on construction."""
         name = self.name
         try:
-            module = _get_module(name)
+            module = _import_module(name)
             self.loadtime = (time.time(), time.asctime())
             # Inject a PluginUnloadMonitor into the module so we know when the GC unloads it
-            module._monitor = PluginUnloadMonitor(name, self.loadtime[1])
+            module._monitor = PluginUnloadMonitor(name, self.loadtime[0])
             # Mark this module as a plugin
             module.__plugin__ = self
             return module
@@ -90,7 +112,9 @@ class Plugin(object):
         
 
     def unload(self):
-        "Unloads this plugin and removes it from the PluginLoader. It will be disabled for all networks."
+        """
+        Unloads this plugin and removes it from the PluginLoader. It will be disabled for all networks.
+        """
         log.debug("Unloading plugin %s..." % self.name)
         self.unsubscribe()
         # Remove ourself from the PluginLoader's list
@@ -109,7 +133,9 @@ class Plugin(object):
         self.module = None
 
     def reload(self):
-        "Reloads this plugin's code from disk. This will disable and re-enable the plugin for all networks."
+        """
+        Reloads this plugin's code from disk. This will disable and re-enable the plugin for all networks.
+        """
         # TODO: Disable for all networks
         self.unsubscribe()
 
@@ -120,9 +146,11 @@ class Plugin(object):
         # TODO: Enable for all networks
 
     def disable(self, network):
-        """Disables the plugin and runs its on_disable handler, if it has one.
+        """
+        Disables the plugin and runs its on_disable handler, if it has one.
         
-        Any event handlers will no longer receive events from this network."""
+        Any event handlers will no longer receive events from this network.
+        """
         
         del network.enabled_plugins[self.name]
         if hasattr(self.module, 'on_disable') and callable(self.module.on_disable):
@@ -144,16 +172,25 @@ class Plugin(object):
             callback(None)
     
     def unsubscribe(self):
-        """Unsubscribes from all subscribed events for this plugin.
-        Optionally, only unsubscribe from events for a particular network."""
+        """
+        Unsubscribes from all subscribed events for this plugin.
+
+        Optionally, only unsubscribe from events for a particular network. (how? why?)
+        """
         subs = self.subscriptions.copy()
         # Work with a copy so we don't modify the list while iterating
         for func, event in subs.iteritems():
             event.unsubscribe(func)
         self.subscriptions = {}
 
+@event_handler(PluginUnloadEvent)
+def on_unload(event):
+    log.info(event.plugin)
+
 def get_plugin(name):
-    """Attempts to retrieve and return a Plugin. If the plugin exists but is not yet loaded, it will be loaded and returned."""
+    """
+    Attempts to retrieve and return a Plugin. If the plugin exists but is not yet loaded, it will be loaded and returned.
+    """
     if name in plugins:
         return plugins[name]
     else:

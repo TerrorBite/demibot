@@ -12,7 +12,7 @@ from ircstack.util import get_logger
 log = get_logger()
 
 from ircstack.util import PriorityQueue, catch_all, humanid, hrepr
-from ircstack.dispatch.async import DelayedTask
+from ircstack.dispatch.async import AsyncDelayed
 
 class SocketClosedError(socket.error):
     """
@@ -247,12 +247,13 @@ class LineBufferedSocket(socket.socket):
                 if l < len(data):
                     self.log.warn("Not all data could be sent, trying again")
                     self._sendbuf = data[l:]
-                    DelayedTask(self._send, 0.1)('')
+                    AsyncDelayed(self._send, 0.1)('') # is this really the best way to do this?
+                    # TODO: find a way to get the SocketManager to do the retry instead?
             except socket.error as e:
                 if e[0]==errno.EAGAIN:
                     self.log.warn("Error when sending some data, trying again")
                     self._sendbuf = data
-                    DelayedTask(self._send, 0.1)('')
+                    AsyncDelayed(self._send, 0.1)('')
                 elif e[0] in (errno.ECONNRESET, errno.ETIMEDOUT, errno.EPIPE):
                     # A network error occurred.
                     self._cleanup(e)
@@ -397,7 +398,7 @@ class SendThrottledSocket(LineBufferedSocket):
             # Add message to queue.
             self.sendq.put(message+'\r\n', priority)
             # Request a callback to process the queued message
-            DelayedTask(self.tick, delay)()
+            AsyncDelayed(self.tick, delay)()
             self.log.debug("Throttling engaged: len(sendq)=%d, allowance=%.2f, delay=%.2f" % (len(self.sendq), self.allowance, delay))
         else:
             # No queue. Send the data immediately.
@@ -426,7 +427,7 @@ class SendThrottledSocket(LineBufferedSocket):
                 delay = self._get_delay()
                 self.log.debug('Ticked, but not enough allowance! allowance=%f len(sendq)=%d\n'
                     'Rescheduling tick in %.2f seconds.' % (self.allowance, len(self.sendq), delay))
-                DelayedTask(self.tick, delay)()
+                AsyncDelayed(self.tick, delay)()
         else:
             self.log.debug('Ticked, but the queue is empty! Nothing to send!')
     

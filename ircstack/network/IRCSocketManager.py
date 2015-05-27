@@ -179,9 +179,9 @@ def _run():
     """
 
     log.info('IRCSocketManager is now running.')
+    global epoll, fdmap
 
     # Set up epoll object
-    global epoll
     epoll = select.epoll()
 
     # Register socksignal into epoll socketset
@@ -244,19 +244,24 @@ def _run():
                 # Connection timed out
                 conn.on_connect_failed()
 
+    # end while
+    # Shutdown procedure
     sig.reset()
     epoll.close()
-    # end while
+    for socket in fdmap.itervalues():
+        socket.close()
+    fdmap = {}
     log.info('IRCSocketManager shut down cleanly.')
 
-def stop():
+def shutdown():
     global running
 
     log.debug('Shutting down Socket Manager: Interrupting epoll')
     # Interrupt our select() call
     running=False
     sig.set()
-    thread.join(0.2)
+    # Wait up to a second for our thread to terminate
+    thread.join(1.0)
 
 
 # If platform is not linux:

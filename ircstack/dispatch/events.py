@@ -2,6 +2,7 @@
 import sys
 import weakref
 import traceback
+import types
 from collections import namedtuple
 
 # Set up logging
@@ -15,7 +16,8 @@ from ircstack.dispatch.async import Async
 # NOTE: ircstack.events is a low-level import and should
 # avoid importing any high-level ircstack modules.
 
-HandlerInfo = namedtuple('HandlerInfo', ('event', 'origin', 'params', 'boundmethods'))
+#: Stores information on an Event handler. Used by the EventListener class.
+HandlerInfo = namedtuple('HandlerInfo', ('event', 'origin', 'params'))
 
 def event_handler(event_class, **params):
     """
@@ -54,12 +56,12 @@ def event_handler(event_class, **params):
         if context != "<module>":
             # This function is an unbound instance method, act accordingly
             # (note that we receive the actual function, not an unbound method wrapper)
-            log.debug("@Dispatcher.event_handler(%s) detected on %s.%s() instance method (%s)" % \
-                    (event_class.__name__, context, func.__name__, repr(func)) )
+            print "@Dispatcher.event_handler(%s) detected on %s.%s() instance method (%s)" % \
+                    (event_class.__name__, context, func.__name__, repr(func))
             #log.warn('@Dispatcher.event_handler() was used on an "%s" instance method, ignoring!' % context)
 
             # store handler information for later use
-            func.handler = HandlerInfo(event=event_class, origin=context, params=params, boundmethods=[])
+            func.handler = HandlerInfo(event=event_class, origin=context, params=params)
         else:
             # Just a normal function
             log.debug('@Dispatcher.event_handler() decorator is subscribing %s to %s' % (repr(func), event_class.__name__))
@@ -70,31 +72,88 @@ def event_handler(event_class, **params):
         return func
     return register
 
+class WeakBinding(weakref.ref):
+    """
+    Binds a function to an instance using a weak reference.
+
+    This class serves a similar purpose to the built-in instancemethod type,
+    but uses a weak reference in order to avoid reference loops.
+
+    If called when the instance that it is bound to no longer exists, it will
+    raise a ReferenceError.
+    """
+    def __init__(self, instance, func):
+        self.__name__ = func.__name__
+        self.__doc__ = func.__doc__
+        self.im_func = func
+        self.im_class = instance.__class__
+        super(WeakBinding, self).__init__(instance)
+
+    # Maintain compatibility with bound-method objects
+    @property
+    def im_self(self):
+       return super(WeakBinding, self).__call__()
+
+    def __call__(self, *args, **kwargs):
+        instance = self.im_self
+        if instance is not None:
+            return self.im_func(instance, *args, **kwargs)
+        else:
+            raise ReferenceError("Cannot call method {0}.{1} of an instance which no longer exists".format(
+                self.__name__, self.im_class.__name__))
+
+    def __repr__(self):
+        return"<weakly-bound method {1}.{0} of {2}>".format(self.__name__, self.im_class.__name__, repr(self.im_self))
+
+
 class EventListener(object):
     """
     Base class for classes that wish to use the @event_handler decorator on instance methods.
     """
     log = get_logger()
     def __init__(self):
+        self.subscribe_all()
+
+    def subscribe_all(self):
         """
-        Calls subscribe() for each event handler defined in this class.
+        Subscribes every event handler defined in this class to its corresponding event.
+
+        This method searches the class for functions that were marked by @event_handler when the
+        class was declared. It then uses the information stored in the attached HandlerInfo
+        to subscribe this instance's corresponding instance method to the correct event.
         """
+        self._bound_handlers = {}
+
         # Locate the class functions that were marked by @event_handler
-        handlers = filter(lambda x: hasattr(x, 'handler'), self.__class__.__dict__.values())
-        #print handlers
+        handlers = tuple(f for f in self.__class__.__dict__.itervalues() if type(f) is types.FunctionType and hasattr(f, 'handler'))
+
         for func in handlers:
             event = func.handler.event
 
             # Bind func to instance before submitting to subscribe().
-            boundmethod = func.__get__(self, self.__class__)
+            #boundmethod = func.__get__(self, self.__class__)
+            # Rather than using a Python 2.x binding, make a wrapper that uses a weakref.
+            # This avoids cyclic references.
+            method = WeakBinding(self, func)
 
-            # Store the bound-method wrapper in the HandlerInfo tuple so that it
-            # has a strong reference, because subscribe() stores weakrefs.
-            func.handler.boundmethods.append(boundmethod)
-            self.log.debug("(EventListener) Subscribing %s to %s" % \
-                    (repr(boundmethod), event.__name__))
+            # The event system stores weakrefs, so we need to store a strong reference
+            # to our method wrapper in order to keep it alive so it isn't garbage collected.
+            self._bound_handlers[func] = method
+
+            self.log.debug("(EventListener) Subscribing {0} to {1}".format(repr(method), event.__name__))
             # Subscribe the bound method to the event.
-            event.subscribe(boundmethod, func.handler.params)
+            event.subscribe(method, func.handler.params)
+
+    def unsubscribe_all(self):
+        """
+        Unsubscribes every event handler defined in this class.
+
+        Calls <EventType>.unsubscribe() on the list of handlers saved by the subscribe_all() method.
+        If the handlers were already unsubscribed, the list will be empty.
+        """
+        for func, handler in self._bound_handlers.iteritems():
+            func.handler.event.unsubscribe(handler)
+        self._bound_handlers = {}
 
 class Sender(object):
     """
@@ -105,6 +164,7 @@ class Sender(object):
         ident   The ident portion of the sender, or None if not specified.
         host    The hostname portion of the sender, or None if not specified.
     """
+    # TODO: Move this out of the event class, maybe? Why is it in here?
     def __init__(self, message):
         # Save the IRCEncoder from the message for use in __str__
         self.encoder = message.encoder
@@ -223,9 +283,11 @@ class EventBase(object):
         False: Do not call the handler, regardless of what superclasses think. You should
             return this if the event content is not relevant to your Event, or if the
             handler gave parameters that exclude this event.
+
         None: Let superclasses decide if the handler should be called. You should return
             this if the parameters you care about allow the handler to be called. This
             gives superclasses the chance to cancel the event based on other parameters.
+
         True: Call the handler, regardless of what superclasses say. BEWARE: You should only
             return True if you know exactly what all of your base classes are doing in their
             may have unintended side effects (such as plugins receiving the events for all
@@ -235,10 +297,12 @@ class EventBase(object):
         Notes:
 
           * If you do not declare a filter() method, it is equivalent to declaring one that
-            always returns None.
+            always returns None (because the superclass method will run instead).
+
           * You do not need to explicitly call super().filter() unless you are performing
             complicated logic that needs to check whether a base class would call the
             handler. In most cases, simply returning None is sufficient.
+
           * Do NOT try to use this method to run code when your event is fired. Remember,
             filter() is not only called for each and every handler subscribed to THIS event,
             but is potentially also called multiple times whenever a derived event is fired!
@@ -286,6 +350,7 @@ class MessageReceivedEvent(EventBase):
     It is designed to be received by an IRCNetwork and is used to offload the processing
     of an incoming message from the SocketManager thread to a Dispatcher thread.
     """
+    # TODO: Nuke this entire class from orbit
 
     def __init__(self, network, message):
         self.network = network
@@ -304,8 +369,15 @@ class MessageReceivedEvent(EventBase):
             params['_network'] = func.im_self
         return super(MessageReceivedEvent, cls).subscribe(func, params)
 
+        ## hey this event isn't as bad as I remember, I forgot that I'd already
+        ## ripped out the awful special-case code and replaced it with
+        ## a nice tidy filter() and parameter system
+
     def filter(self, params):
         """Filter out networks that are not the network that fired this event."""
+        ## EXCEPT FOR THE FACT THAT WE NEED TO FILTER OUT NETWORKS AT ALL, I MEAN REALLY?
+        ## Events are just the wrong tool for this job, the Sync() method is so much simpler
+
         # No need to return None because we inherit directly from EventBase,
         # whose filter() always returns True.
         if '_network' not in params:
@@ -381,6 +453,7 @@ class IRCEvent(EventBase):
         # This filter will always call a non-plugin handler. For plugins it
         # will only call the handler if the network that fired this event
         # has the plugin enabled.
+        ## TODO: eeeeuuurrgh fix it, fix it, fix it, fix it!! fix it, fix it, fix it!
 
         # No need to return None because we inherit directly from EventBase,
         # whose filter() always returns True.

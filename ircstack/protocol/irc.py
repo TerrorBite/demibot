@@ -14,13 +14,11 @@ log = get_logger()
 import ircstack.network
 from ircstack.dispatch import Dispatcher
 from ircstack.dispatch.events import EventListener, event_handler
-from ircstack.dispatch.async import DelayedTask
+from ircstack.dispatch.async import SyncDelayed
 import ircstack.dispatch.events as events
 from ircstack.protocol import isupport
 from collections import namedtuple
 
-#TODO: Remove this when PluginLoader moved fully to demibot
-from demibot import PluginLoader
 
 #dispatch = Dispatcher.dispatch
 
@@ -56,8 +54,22 @@ class handles(object):
 #   to send that parameter; thus no default is specified. We choose a sane
 #   default, based on RFC 1459 if possible.
 
+class IRCServerList(object):
+    """
+    Manages a list of IRC servers, monitors connections, and manages automatic reconnection.
+
+    (At the moment the IRCConnection class takes a list of servers to connect to and tries to
+            establish a connection to each. This needs to be dumbed down; an IRCConnection
+            should only represent a connection to a server specified by a single IP or DNS name
+            plus port number.)
+
+    **WIP**
+    """
+    #TODO: Implement this
+
 class IRCNetwork(EventListener):
-    """An IRCNetwork stores the state of a connection to an IRC network, and acts as an object-oriented
+    """
+    An IRCNetwork stores the state of a connection to an IRC network, and acts as an object-oriented
     interface for performing standard IRC commands and actions.
     
     It handles incoming IRCMessages and parses them to handle various commands and replies appropriately.
@@ -73,7 +85,12 @@ class IRCNetwork(EventListener):
     log = get_logger()
 
     def __init__(self, config, autoconnect=False):
-        """Creates a new IRCNetwork instance based on the given config."""
+        """
+        Creates a new IRCNetwork instance based on the given config.
+        """
+        # TODO: don't store config, make IRCNetwork completely ignorant of demibot code
+        # Probably add a ton of constructor arguments here, and make the config class
+        # return an IRCNetwork instance from a factory function
 
         # Store config
         self.conf = config
@@ -94,16 +111,18 @@ class IRCNetwork(EventListener):
 
         self.enabled_plugins = {}
 
-        # DelayedTask to abort STARTTLS
+        # SyncDelayed task to abort STARTTLS
         self._starttls_task = None
 
         # Subscribe to events (via EventListener superclass)
+        # XXX: What events do we subscribe to, now? Do we still need to be an EventListener?
         super(IRCNetwork, self).__init__()
 
         # Load/enable plugins
         for k in config.plugins.keys():
             try:
                 #TODO: Move all config/plugin stuff out to demibot
+                from demibot import PluginLoader
                 PluginLoader.get_plugin(k).enable(self)
                 self.log.debug("Loaded plugin %s in network %s" % (k, repr(self)))
             except:
@@ -206,7 +225,7 @@ class IRCNetwork(EventListener):
         #self.send_raw(self.Message(u'MODE', u'IRCv3'))
         self._conn.starttls_begin()
         # after 5 seconds, assume STARTTLS was ignored
-        self._starttls_task = DelayedTask(self._conn.starttls_abort, 5.0)()
+        self._starttls_task = SyncDelayed(self._conn.starttls_abort, 5.0)()
 
         # TODO: Send PASS here
         self.send_raw(self.Message(u'NICK', nickname), IMMEDIATE)
@@ -218,39 +237,34 @@ class IRCNetwork(EventListener):
         """
         Called when the IRC network disconnects us.
         """
-        # TODO: Replace with an Event
+        # TODO: Replace with an Event ACTUALLY MAYBE DON'T DO THAT need to think about it
         pass
 
-    @event_handler(events.MessageReceivedEvent)
-    def on_MessageReceived(self, evt):
-        """Called when an IRCEvent is raised.
+    #@event_handler(events.MessageReceivedEvent)
+    def on_received(self, msg):
+        """
+        Called when an IRCMessage is received by our current IRCConnection.
 
         This method looks for an appropriate internal handler method (as registered using
         the @handler decorator) for the particular type of message received from the IRC
         server, and calls it if it finds one. That handler will be responsible for modifying
         the IRCNetwork's state as required, and generating the appropriate IRCEvent subclass
-        for use by plugins."""
+        for use by plugins.
+        """
 
-        # Shouldn't need this if statement, but just to be safe
-        if evt.network is self:
-            msg = evt.message
-            cmd = msg.command.upper()
-            # Call the registered handler for this message, if there is one
-            if msg.command in handlers:
-                handlers[msg.command.upper()](self, msg)
-                # Also fire an IRCEvent for anyone interested in the raw message
-                # (NOTE: IRCEvent is fired AFTER internal message handling is complete)
-                events.IRCEvent(self, msg).dispatch()
-            else:
-                if len(cmd) == 3 and cmd.isdigit():
-                    self.log.warning("Received unknown %s numeric: %s" % (cmd,msg))
-                else:
-                    self.log.warning("Received unknown %s command: %s" % (cmd,msg))
-                self.on_unhandled(evt)
+        cmd = msg.command.upper()
+        # Call the registered handler for this message, if there is one
+        if msg.command in handlers:
+            handlers[msg.command.upper()](self, msg)
+            # Also fire an IRCEvent for anyone interested in the raw message
+            # (NOTE: IRCEvent is fired AFTER internal message handling is complete)
+            events.IRCEvent(self, msg).dispatch()
         else:
-            # This shouldn't happen
-            self.log.warning("%s was called for an event thrown by %s" % (repr(self), repr(evt.network)))
-            self.log.debug(evt.message)
+            if len(cmd) == 3 and cmd.isdigit():
+                self.log.warning("Received unknown %s numeric: %s" % (cmd,msg))
+            else:
+                self.log.warning("Received unknown %s command: %s" % (cmd,msg))
+            self.on_unhandled(events.IRCEvent(self, msg))
 
 ##### IRCNetwork        ###############
 ##### Internal Handlers ###############
@@ -276,7 +290,7 @@ class IRCNetwork(EventListener):
         """
         Called when there is no handler available for a particular message type.
         """
-        events.UnknownMessageEvent(self, evt.message).dispatch()
+        events.UnknownMessageEvent(self, evt.ircmessage).dispatch()
         pass
 
     ############
@@ -411,16 +425,18 @@ class IRCNetwork(EventListener):
             if chans: self.join_all(chans)
 
         # Execute delayed autojoin task
-        DelayedTask(autojoin, 2.0)()
+        SyncDelayed(autojoin, 2.0)()
         events.EndOfMOTDEvent(self, msg).dispatch()
 
     @handles(437)
     def handle_unavailresource(self, msg):
         """
         RPL_UNAVAILRESOURCE: Defined in RFC2812.
-        - Returned by a server to a user trying to join a channel
+
+        * Returned by a server to a user trying to join a channel
           currently blocked by the channel delay mechanism.
-        - Returned by a server to a user trying to change nickname
+
+        * Returned by a server to a user trying to change nickname
           when the desired nickname is blocked by the nick delay
           mechanism.
         """
