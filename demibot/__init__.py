@@ -25,8 +25,8 @@ from ircstack.dispatch import Dispatcher
 from ircstack.dispatch.events import EventListener, event_handler
 from ircstack.dispatch.async import SyncDelayed
 import ircstack.dispatch.events as events
-from ircstack.network import IRCSocketManager, NoValidAddressError
-from ircstack.protocol.irc import IRCNetwork
+from ircstack.network import IRCSocketManager
+from ircstack.protocol.irc import IRCNetwork, NoValidAddressError
 from demibot import PluginLoader, console
 from demibot.config import load_config
 

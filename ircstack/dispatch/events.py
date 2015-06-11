@@ -6,7 +6,7 @@ import types
 from collections import namedtuple
 
 # Set up logging
-from ircstack.util import get_logger, hrepr
+from ircstack.util import get_logger, hrepr, WeakBinding
 log = get_logger()
 
 # Local imports
@@ -71,40 +71,6 @@ def event_handler(event_class, **params):
         # Return the function, unmodified
         return func
     return register
-
-class WeakBinding(weakref.ref):
-    """
-    Binds a function to an instance using a weak reference.
-
-    This class serves a similar purpose to the built-in instancemethod type,
-    but uses a weak reference in order to avoid reference loops.
-
-    If called when the instance that it is bound to no longer exists, it will
-    raise a ReferenceError.
-    """
-    def __init__(self, instance, func):
-        self.__name__ = func.__name__
-        self.__doc__ = func.__doc__
-        self.im_func = func
-        self.im_class = instance.__class__
-        super(WeakBinding, self).__init__(instance)
-
-    # Maintain compatibility with bound-method objects
-    @property
-    def im_self(self):
-       return super(WeakBinding, self).__call__()
-
-    def __call__(self, *args, **kwargs):
-        instance = self.im_self
-        if instance is not None:
-            return self.im_func(instance, *args, **kwargs)
-        else:
-            raise ReferenceError("Cannot call method {0}.{1} of an instance which no longer exists".format(
-                self.__name__, self.im_class.__name__))
-
-    def __repr__(self):
-        return"<weakly-bound method {1}.{0} of {2}>".format(self.__name__, self.im_class.__name__, repr(self.im_self))
-
 
 class EventListener(object):
     """

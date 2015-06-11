@@ -80,8 +80,8 @@ def register(sock):
     a connecting state.
     """
     if sock is None: return
-    # Override the LineBufferedSocket's on_dead stub
-    sock.on_dead = on_dead.__get__(sock, sock.__class__)
+    # Hook the LineBufferedSocket's "dead" hook
+    sock.hooks.dead += on_dead
 
     if sock.error:
         # Connection failed on initial connect()

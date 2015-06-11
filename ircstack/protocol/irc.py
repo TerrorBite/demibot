@@ -4,7 +4,9 @@ High-level IRC protocol handling.
 """
 
 # Python imports
-# (none)
+import urlparse
+import itertools
+import socket
 
 # Set up logging
 from ircstack.util import get_logger, hrepr
@@ -14,10 +16,9 @@ log = get_logger()
 import ircstack.network
 from ircstack.dispatch import Dispatcher
 from ircstack.dispatch.events import EventListener, event_handler
-from ircstack.dispatch.async import SyncDelayed
+from ircstack.dispatch.async import SyncDelayed, AsyncDelayed
 import ircstack.dispatch.events as events
 from ircstack.protocol import isupport
-from collections import namedtuple
 
 
 #dispatch = Dispatcher.dispatch
@@ -47,12 +48,27 @@ class handles(object):
             handlers[c] = func
         return func
 
-# "005 default": Our default is the value given by the ISUPPORT draft as the
-#   default for this ISUPPORT parameter.
-# "005/RFC default": As above, but the default also matches the RFC 1459 spec.
-# "005 required": The ISUPPORT draft says that a supporting server is required
-#   to send that parameter; thus no default is specified. We choose a sane
-#   default, based on RFC 1459 if possible.
+# ircstack.protocol.irc
+class NoValidAddressError(Exception):
+    pass
+
+# ircstack.protocol.irc
+class IRCServer(object):
+    """
+    Holds details about an IRC server.
+    Accepts an irc:// (or ircs://) URI.
+    """
+    def __init__(self, uri):
+        result = urlparse.urlparse(uri, allow_fragments=False)
+        self.ssl = True if result.scheme.lower() == 'ircs' else False
+        self.host = result.hostname
+        self.port = result.port or 994 if result.scheme.lower() == 'ircs' else 6667
+        self.password = result.password
+        self.ident = result.username
+
+    @property
+    def address(self):
+        return (self.host, self.port)
 
 class IRCServerList(object):
     """
@@ -64,8 +80,117 @@ class IRCServerList(object):
             plus port number.)
 
     **WIP**
+
+    IRCServerList handles:
+        - Server prioritization
+        - IPv4/IPv6 preference
+        - Connection retries
+        - DNS lookups
+        - Maintianing a blacklist of known-bad servers to avoid connecting to
     """
     #TODO: Implement this
+    log = get_logger()
+
+    def __init__(self, serverlist, encoder=None):
+        #: A list of servers (IRCServer instances) to use.
+        self.serverlist = serverlist
+
+        #: The IRCEncoder to provide to the IRCConnections. If not supplied, a sane default is used.
+        self.encoder = ircstack.network.IRCEncoder('iso-8859-1') if encoder is None else encoder
+
+        #: A generator that provides the next configured server.
+        self.servers = itertools.cycle(serverlist)
+        #: A generator that provides the next address in the current server.
+        self.addresses = (x for x in ())
+
+        #: The current IRCConnection.
+        self.connection = None
+
+        # TODO: Configurable option to select IPv6 only / IPv4 only / IPv6 preferred / IPv4 preferred
+        self.prefer_ipv4 = False #: Sets whether IPv4 should be preferred instead of IPv6.
+        self.only_preferred = False #: Sets whether the protocol selected by "prefer_ipv4" should be forced.
+
+
+    def get_connection(self, force_ipv4=False):
+        """
+        Gets an IRCConnection for the next available IRC server.
+        """
+        while True:
+            self.log.debug("Fetching next address")
+            try:
+                address = self.addresses.next()
+                break
+            except StopIteration:
+                # We've run out of addresses to connect to for the current server
+                # Try the next server in the list
+                self.log.debug("No addresses left, fetching next server")
+                try:
+                    self.current_server = self.servers.next()
+                except StopIteration:
+                    # No servers are left
+                    self.log.error('Connection request failed: No more servers to connect to')
+                    self.connection = None
+                    raise NoValidAddressError('No valid addresses supplied')
+                else:
+                    # Server acquired, is it a DNS name, or a bare IP address?
+                    try:
+                        # Is this server already an IPv4 address?
+                        socket.inet_pton(socket.AF_INET, self.current_server.host)
+                        self.addresses = (x for x in [self.current_server.address])
+                        continue
+                    except socket.error:
+                        # it isn't IPv4. It might be IPv6
+                        if not force_ipv4:
+                            try:
+                                # Check if it's IPv6
+                                socket.inet_pton(socket.AF_INET6, self.current_server.host)
+                                self.addresses = (x for x in [self.current_server.address])
+                                continue
+                            except socket.error:
+                                pass
+                        self.log.debug("DNS lookup required")
+                        # It's not an IP address, do a DNS lookup
+                        ip4list, ip6list = self.dns_lookup(self.current_server)
+                        if force_ipv4:
+                            self.addresses = (x for x in ip4list)
+                        elif self.only_preferred:
+                            self.addresses = (x for x in ip4list) if self.prefer_ipv4 else (x for x in ip6list)
+                        else:
+                            self.addresses = (x for x in ip4list+ip6list) if self.prefer_ipv4 else (x for x in ip6list+ip4list)
+                        # jump to top to fetch first address
+                        continue
+        # attempt successful connection
+        return ircstack.network.IRCConnection(address, self.current_server.ssl, self.encoder)
+
+    def dns_lookup(self, server):
+        ip4list, ip6list = [], []
+        self.log.info('Resolving address {0.host}:{0.port}'.format(server)) 
+        try:
+            addrinfo = socket.getaddrinfo(*server.address)
+        except socket.error, e:
+            if e[0] == errno.ENOENT:
+                # Hostname does not exist
+                self.log.warn('Host not found resolving {0}'.format(server.host))
+            else:
+                self.log.error('Unknown error {0[0]} resolving {1}: {0[1]}'.format(e, server.host))
+        else:
+            # Python 2.6 doesn't support dict comprehensions
+            #ip4list += {tuple(x[4]) for x in addrinfo if x[0]==socket.AF_INET}
+            #ip6list += {tuple(x[4][:2]) for x in addrinfo if x[0]==socket.AF_INET6}
+            ip4list += [tuple(x[4]) for x in addrinfo if x[0]==socket.AF_INET]
+            ip6list += [tuple(x[4][:2]) for x in addrinfo if x[0]==socket.AF_INET6]
+        
+        # Dedup lists
+        ip4list, ip6list = dict(ip4list).items(), dict(ip6list).items()
+        #log.debug("IPv4 addresses: "+repr(ip4list))
+        #log.debug("IPv6 addresses: "+repr(ip6list))
+
+        if not ip6list and not ip4list: 
+            self.log.warn('DNS lookup for {0} returned no addresses'.format(server.host))
+
+        return ip4list, ip6list
+
+
 
 class IRCNetwork(EventListener):
     """
@@ -96,11 +221,12 @@ class IRCNetwork(EventListener):
         self.conf = config
 
         # Compile server list from config
-        serverlist = [ircstack.network.IRCServer(uri) for uri in config.servers]
+        serverlist = [IRCServer(uri) for uri in config.servers]
 
         # DEBUG: Using a sane encoder
-        self._encoder = ircstack.network.IRCEncoder('iso-8859-1')
-        self._conn = ircstack.network.IRCConnection(self, serverlist, encoder=self._encoder)
+        self.encoder = ircstack.network.IRCEncoder('iso-8859-1')
+        self.serverlist = IRCServerList(serverlist, self.encoder)
+        self._new_conn()
 
         # Important settings - use RFC1459-specified defaults in case server doesn't send ISUPPORT
         self.isupport = isupport.ISupport()
@@ -142,7 +268,7 @@ class IRCNetwork(EventListener):
         if isinstance(command, str): command = command.decode('utf-8','replace')
         params = [param.decode('utf-8','replace') if isinstance(param, str) else param for param in params]
 
-        return ircstack.network.IRCMessage(self._encoder, None, command, params)
+        return ircstack.network.IRCMessage(self.encoder, None, command, params)
     
     def _ctcp(self, cmd, type_, target, params):
         return self.Message(cmd, target, u"\u0001%s%s\u0001" % (type_.upper(), u' ' + ' '.join(params) if params else u''))
@@ -155,6 +281,17 @@ class IRCNetwork(EventListener):
         """Factory function to generate an IRCMessage consisting of a single CTCP reply."""
         return self._ctcp(u'NOTICE', type_, target, params)
 
+
+    def _new_conn(self):
+        conn = self.serverlist.get_connection()
+
+        conn.hooks.connected += self.on_connected
+        conn.hooks.connect_failed += self.on_connect_failed
+        conn.hooks.received += self.on_received
+        conn.hooks.hangup += self.on_disconnected
+        conn.hooks.error += self.on_disconnected
+
+        self._conn = conn
 
     def connect(self):
         # Connect to our config-defined IRC servers
@@ -232,6 +369,11 @@ class IRCNetwork(EventListener):
         self.send_raw(self.Message(u'USER', ident, hostname, servername, realname), IMMEDIATE)
 
         self.nick = nickname
+
+    def on_connect_failed(self, conn):
+        log.debug('Connection failed - Network on_connect_failed was called')
+        self._new_conn()
+        AsyncDelayed(self.connect, 10)()
 
     def on_disconnected(self):
         """

@@ -11,7 +11,7 @@ from time import time
 from ircstack.util import get_logger
 log = get_logger()
 
-from ircstack.util import PriorityQueue, catch_all, humanid, hrepr
+from ircstack.util import Hooks, PriorityQueue, catch_all, humanid, hrepr
 from ircstack.dispatch.async import AsyncDelayed
 
 class SocketClosedError(socket.error):
@@ -45,13 +45,19 @@ class LineBufferedSocket(socket.socket):
         self._lines = []
         self._suspended = False
 
+        #: Hooks for events that may occur. Available hooks are:
+        #: dead
+        self.hooks = Hooks(['dead'])
+
+        #: Stores the address that this socket is connected to.
         self.address = None
+        #: Stores the last socket error to occur.
         self.error = None
 
         self.use_ssl = use_ssl
 
-        # In order to be helpful to higher-level code, store a reference to
-        # some optional "parent" object. We don't use it or care what it is.
+        #: In order to be helpful to higher-level code, store a reference to
+        #: some optional "parent" object. We don't use it or care what it is.
         self.parent = parent
 
         # Use a pair of re-entrant locks to prevent threading issues.
@@ -192,14 +198,7 @@ class LineBufferedSocket(socket.socket):
         # Don't bother locking here, as socket is already dead
         self.error = error
         # Call on_dead handler
-        self.on_dead()
-    
-    def on_dead(self):
-        """
-        Override this method to run code when the socket dies, but before cleanup.
-        The default implementation in LineBuffereredSocket is a no-op.
-        """
-        pass
+        self.hooks.dead(self)
 
     def is_ready(self):
         """

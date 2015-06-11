@@ -9,6 +9,12 @@ import collections
 from time import time
 from heapq import *
 
+try:
+    from weakref import WeakSet
+except:
+    # Python 2.5 and 2.6
+    from ircstack.lib.weakrefset import WeakSet
+
 def get_logger(name=None):
     if name is None:
         frame = inspect.currentframe().f_back
@@ -92,7 +98,7 @@ class Bunch(object):
     See also: collections.namedtuple, but note that namedtuple is immutable.
     """
     def __init__(self, **kwargs):
-        self.__dict__.update(kwds)
+        self.__dict__.update(kwargs)
 
 
 _required = object()
@@ -102,7 +108,7 @@ def namedtuple(typename, field_names, verbose=False, rename=False):
     """
     if type(field_names) is dict:
         # Dict keys are field names, values are defaults
-        defaults = filter(lambda x: x is not _required, field_names.values())
+        defaults = [x for x in field_names.values() if x is not _required]
         result = collections.namedtuple(typename, field_names.keys(), verbose, rename)
         result.__init__.func_defaults = defaults
         return
@@ -156,6 +162,103 @@ class Singleton(object):
     def _pass(self, *args, **kwargs):
         # Accept and discard potential arguments to subclass constructor
         pass
+
+# Hooks system
+class Hook(object):
+    """
+    A basic system that works similar to the way events do in C#.
+    """
+    def __init__(self, name):
+        #self._targets = WeakSet()
+        self._targets = set()
+        self.name = name
+
+    def __len__(self):
+        return len(self._targets)
+
+    def __iadd__(self, other):
+        if callable(other):
+            self._targets.add(other)
+        else:
+            raise TypeError("You can only add a callable to a hook.")
+        return self
+
+    def __isub__(self, other):
+        self._targets.discard(other)
+        return self
+
+    def __call__(self, *args, **kwargs):
+        #log.debug('Hook({0.name}) was called, targets are {0._targets!r}'.format(self))
+        for target in self._targets:
+            #log.debug('Target: {0!r}'.format(target))
+            if callable(target):
+                target(*args, **kwargs)
+            else:
+                log.debug('Target for Hook() is not callable')
+
+class Hooks(Bunch):
+    def __init__(self, names):
+        super(Hooks, self).__init__(**dict([(name, Hook(name)) for name in names]))
+        #log.debug( repr(dict([(key, getattr(self, key)) for key in dir(self) if not key.startswith('__')])) )
+
+class WeakBinding(weakref.ref):
+    """
+    Binds a function to an instance using a weak reference.
+
+    This class serves a similar purpose to the built-in instancemethod type,
+    but uses a weak reference in order to avoid reference loops.
+
+    If called when the instance that it is bound to no longer exists, it will
+    raise a ReferenceError.
+    """
+    def __init__(self, instance, func):
+        self.__name__ = func.__name__
+        self.__doc__ = func.__doc__
+        self.im_func = func
+        self.im_class = instance.__class__
+        super(WeakBinding, self).__init__(instance)
+
+    # Maintain compatibility with bound-method objects
+    @property
+    def im_self(self):
+       return super(WeakBinding, self).__call__()
+
+    def __call__(self, *args, **kwargs):
+        instance = self.im_self
+        if instance is not None:
+            return self.im_func(instance, *args, **kwargs)
+        else:
+            raise ReferenceError("Cannot call method {0}.{1} of an instance which no longer exists".format(
+                self.__name__, self.im_class.__name__))
+
+    def __nonzero__(self):
+        return self.im_self is not None
+
+    def __repr__(self):
+        return"<weakly-bound method {1}.{0} of {2}>".format(self.__name__, self.im_class.__name__, repr(self.im_self))
+
+class WeakCallable(weakref.ref):
+    def __init__(self, func):
+        self.__name__ = func.__name__
+        self.__doc__ = func.__doc__
+        super(WeakCallable, self).__init__(func)
+
+    @property
+    def _target(self):
+        return super(WeakCallable, self).__call__()
+
+    def __call__(self, *args, **kwargs):
+        instance = _target
+        if instance is not None:
+            return self._target(*args, **kwargs)
+        else:
+            raise ReferenceError("Callable {0} no longer exists".format(self.__name__))
+
+    def __nonzero__(self):
+        return self._target is not None
+
+    def __repr__(self):
+        return"<weak callable {0}>".format(self.__name__)
 
 class catch_all(object):
     """

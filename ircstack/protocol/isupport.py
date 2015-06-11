@@ -30,6 +30,13 @@ class Desc(object):
         # Upon deletion, restore default
         self.val = self.default
 
+# "005 default": Our default is the value given by the ISUPPORT draft as the
+#   default for this ISUPPORT parameter.
+# "005/RFC default": As above, but the default also matches the RFC 1459 spec.
+# "005 required": The ISUPPORT draft says that a supporting server is required
+#   to send that parameter; thus no default is specified. We choose a sane
+#   default, based on RFC 1459 if possible.
+
 class ISupport(object):
     def __init__(self):
         # Set defaults for various ISUPPORT parameters
