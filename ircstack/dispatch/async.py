@@ -5,11 +5,180 @@ from Queue import Queue
 from . import Dispatcher
 
 # Set up logging
-from ircstack.util import get_logger, catch_all, set_thread_name
+from ircstack.util import get_logger, catch_all, set_thread_name, EventHook
 log = get_logger()
 
 __all__ = ['Sync', 'Async', 'SyncDelayed', 'AsyncDelayed', 'SyncRepeating', 'AsyncRepeating',
     'ThreadPool', 'DispatchThreadPool', 'ThreadPoolWorker']
+
+class TaskBase(object):
+    def __init__(self, target, args=[], kwargs={}):
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs
+        self.notify = EventHook()
+        self.method = Sync
+
+        self._flag = threading.Event()
+
+    def async(self):
+        """
+        Specifies that execution does not need to be resumed on the Dispatcher thread after calling this method.
+        """
+        self.method = Async
+        return self
+    
+    @property
+    def result(self): raise NotImplementedError
+    def cancel(self): raise NotImplementedError
+    def execute(self): raise NotImplementedError
+
+    @property
+    def complete(self):
+        return self._flag.is_set()
+
+    @property
+    def result(self):
+        raise NotImplementedError
+
+class ThreadPoolTask(TaskBase):
+    def __init__(self, target, args=[], kwargs={}, callback=None):
+        super(ThreadPoolTask, self).__init__(target, args, kwargs)
+        self.callback = callback
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def execute(self):
+        if self._cancelled: return
+        # Call target
+        self._result = self.target(*self.args, **self.kwargs)
+        if self._cancelled: return
+        
+        # Run callback if it is callable
+        if callable(self.callback):
+            self.callback(self.result)
+
+        # Finally:
+        self._flag.set()
+        self.notify()
+
+    @property
+    def result(self):
+        self._flag.wait()
+        return self._result
+
+class FakeTask(object):
+    #TODO: Remove this probably
+    def execute(self):
+        pass
+    join = execute
+
+class AsyncTask(TaskBase):
+    def __init__(self, func, args, kwargs):
+        super(AsyncTask, self).__init__(func, args, kwargs)
+        self._fr = repr(func)
+        self.notify = EventHook()
+        self.generator = ThreadsafeGenerator(func(*args, **kwargs))
+        #self._lock = RLock()
+        # launch the task
+        self.__count=0
+        self._result = None
+        self._task = None
+
+        self.execute(True)
+
+    def execute(self, first=False):
+        """
+        Called by the Dispatcher to resume execution of our generator.
+        """
+        if self.complete: return
+        # We want this to be called when our subtask is done
+        try:
+            # Call back into our child task
+            #log("%r on %s entering %r [%d]" % (self, cthread(), self.generator, self.__count))
+            try:
+                if isinstance(self._task, TaskBase):
+                    value = self.generator.send(self._task.result)
+                else:
+                    value = self.generator.next()
+            except ValueError as e:
+                #log("%r on %s threw %r [%d]" % (self.generator, cthread(), e, self.__count))
+                raise
+            #log("%r on %s exited %r [%d]" % (self, cthread(), self.generator, self.__count))
+            self.__count += 1
+            if isinstance(value, TaskBase):
+                # Task was returned, process it
+                self._task = value
+                self._task.notify += self._task.method(self.execute)
+            else:
+                # Non-task was returned, treat it as a result
+                self._result = value
+                self._task = None
+                self._flag.set()
+                self.notify()
+        except StopIteration:
+            self._result = None
+            self._flag.set()
+            self.notify()
+
+    @property
+    def result(self):
+        """
+        Retrieves the result of running this Task.
+
+        If the Task is not yet complete, blocks until it has completed.
+        """
+        if self.complete: return self._result
+        # This makes us go synchronous
+        try:
+            value = self._task
+            while True:
+                value = self.generator.send(value.result)
+                if not isinstance(value, TaskBase):
+                    break
+            self._result = value
+        except StopIteration:
+            self._result = None
+        # tasks are complete
+        self._flag.set()
+        return self._result
+
+    def cancel(self):
+        if isinstance(self._task, TaskBase): _task.cancel()
+        self.generator.close()
+
+    def __repr__(self):
+        return "<AsyncTask for %s>" % self._fr
+
+class ThreadsafeGenerator:
+    """
+    Takes a generator and makes it thread-safe by serializing calls to the
+    `next` and `send` methods of the given generator.
+    """
+    def __init__(self, gen):
+        self.gen = gen
+        self.lock = threading.Lock()
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        with self.lock:
+            return self.gen.next()
+
+    def send(self, value):
+        with self.lock:
+            return self.gen.send(value)
+
+    def close(self):
+        return self.gen.close()
+
+def async(f):
+    def wrapper(*args, **kwargs):
+        return AsyncTask(f, args, kwargs)
+    return wrapper
 
 class ThreadPool(object):
     "Generic threadpool implementation."
@@ -45,7 +214,7 @@ class ThreadPool(object):
         """
         if callable(target):
             # add a task to the queue with no args or kwargs
-            self.queue.put((target, (), {}, None))
+            self.queue.put(ThreadPoolTask(target))
         else:
             raise ValueError("First argument must be callable")
 
@@ -64,7 +233,9 @@ class ThreadPool(object):
         as its sole argument.
         """
         def proxy(*args, **kwargs):
-            self.queue.put((target, args, kwargs, callback))
+            task = ThreadPoolTask(target, args, kwargs, callback)
+            self.queue.put(task)
+            return task
         return proxy
 
 class ThreadPoolWorker(threading.Thread):
@@ -88,15 +259,9 @@ class ThreadPoolWorker(threading.Thread):
     def run(self):
         self.log.debug('%s now waiting for work' % self.name)
         while True:
-            # Block on queue.get() until work arrives, then unpack work
-            target, args, kwargs, callback = self.queue.get()
+            # Block on queue.get() until work arrives, then execute work
+            self.queue.get().execute()
 
-            # Call target
-            results = target(*args, **kwargs)
-            
-            # Run callback if it is callable
-            if callable(callback):
-                callback(results)
 
 class DispatchThreadPool(ThreadPool):
     
@@ -128,11 +293,14 @@ def Async(target, callback=None, fail_if_sync=False):
         # a proxy that calls target synchronously and passes result to callback synchronously
         def proxy(*args, **kwargs):
             callback(target(*args, **kwargs))
+            return FakeTask()
         return proxy
     else:
         # Threadpool not running, no callback provided - fail silently
         # Nothing to do here - return the actual target in lieu of a proxy
-        return target
+        def proxy(*args, **kwargs):
+            target(*args, **kwargs)
+            return FakeTask()
 
 def Sync(target, callback=None):
     """

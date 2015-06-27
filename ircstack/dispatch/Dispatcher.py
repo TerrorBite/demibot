@@ -79,10 +79,23 @@ def start():
     """
     Starts the Dispatcher running in its own thread.
     """
-    global _thread
+    global _thread, _threadpool
     if not running:
         _thread = threading.Thread(name='Dispatcher', target=_run)
         _thread.start()
+
+        main_thread = threading.current_thread()
+        @set_thread_name
+        def run_watchdog():
+            main_thread.join()
+            if running:
+                log.error("Watchdog: Main thread has exited!")
+                shutdown()
+        threading.Thread(name='Watchdog', target=run_watchdog).start()
+
+        from ircstack.dispatch.async import DispatchThreadPool
+        _threadpool = DispatchThreadPool(4)
+    
 
 def shutdown():
     """
@@ -127,14 +140,10 @@ def _run():
     Internal: Dispatcher main loop. Waits for new items in the input queue,
     and for scheduled tasks to become due.
     """
-    global running
+    global running, _threadpool
     running = True
     log.info('Dispatcher started')
 
-    from ircstack.dispatch.async import DispatchThreadPool
-    global _threadpool
-    _threadpool = DispatchThreadPool(4)
-    
     while running:
         # Process pending tasks and receive timeout for our Queue.get() call.
         # If there are no scheduled tasks in future, it returns None which will never timeout.
@@ -160,7 +169,7 @@ def _run():
                 work()
             except Exception, e:
                 log.exception("Exception occurred while dispatching event")
-        else: log.debug("Dispatcher got non-callable %s" % event)
+        else: log.debug("Dispatcher got non-callable %r" % work)
 
     # end while
     # We exited the loop, so begin shutdown procedure

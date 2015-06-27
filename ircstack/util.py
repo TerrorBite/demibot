@@ -168,7 +168,7 @@ class Hook(object):
     """
     A basic system that works similar to the way events do in C#.
     """
-    def __init__(self, name):
+    def __init__(self, name=None):
         #self._targets = WeakSet()
         self._targets = set()
         self.name = name
@@ -195,6 +195,24 @@ class Hook(object):
                 target(*args, **kwargs)
             else:
                 log.debug('Target for Hook() is not callable')
+
+class EventHook(Hook):
+    """
+    Like a Hook, but this is a one-off.
+    Ensures that callables added to this hook AFTER it was triggered
+    will fire immediately.
+    """
+    def __init__(self, name=None):
+        self.fired = False
+        super(EventHook,self).__init__(name)
+    def __iadd__(self, other):
+        if self.fired and callable(other): other()
+        else: return super(EventHook,self).__iadd__(other)
+    def __call__(self):
+        self.fired = True
+        #log.info(self._targets)
+        return super(EventHook,self).__call__()
+        
 
 class Hooks(Bunch):
     def __init__(self, names):
@@ -316,8 +334,13 @@ class catch_all(object):
                     # module directly, which should still work.
                     func_log = func_log if func_log else logging
 
+                    # Remove the frame for this log_exception() function
+                    exc = sys.exc_info()
+                    exc = (exc[0], exc[1], exc[2].tb_next)
+
                     # Log the exception and a warning message (depending on value of retry param)
-                    func_log.error(message, exc_info=True)
+                    func_log.error(message, exc_info=exc)
+                    del exc
                     func_log.debug('Locals: %s' % repr(func_locals))
                     if self.retry is False:
                         func_log.critical('The thread %s will now terminate due to this exception.' % (threading.current_thread().name,))
