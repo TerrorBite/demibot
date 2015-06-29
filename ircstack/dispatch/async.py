@@ -1,5 +1,7 @@
 import sys
+import os
 import threading
+import traceback
 from Queue import Queue
 
 from . import Dispatcher
@@ -12,6 +14,9 @@ __all__ = ['Sync', 'Async', 'SyncDelayed', 'AsyncDelayed', 'SyncRepeating', 'Asy
     'ThreadPool', 'DispatchThreadPool', 'ThreadPoolWorker']
 
 class TaskBase(object):
+    """
+    Base class for objects representing a task to run some code.
+    """
     def __init__(self, target, args=[], kwargs={}):
         self.target = target
         self.args = args
@@ -23,7 +28,7 @@ class TaskBase(object):
 
     def async(self):
         """
-        Specifies that execution does not need to be resumed on the Dispatcher thread after calling this method.
+        Specify that execution does not need to be resumed on the Dispatcher thread after calling this method.
         """
         self.method = Async
         return self
@@ -42,15 +47,24 @@ class TaskBase(object):
         raise NotImplementedError
 
 class ThreadPoolTask(TaskBase):
+    """
+    Represents a task that the thread pool can execute.
+    """
     def __init__(self, target, args=[], kwargs={}, callback=None):
         super(ThreadPoolTask, self).__init__(target, args, kwargs)
         self.callback = callback
         self._cancelled = False
 
     def cancel(self):
+        """
+        Cancel the task.
+        """
         self._cancelled = True
 
     def execute(self):
+        """
+        Execute the callable that this task holds, completing the task.
+        """
         if self._cancelled: return
         # Call target
         self._result = self.target(*self.args, **self.kwargs)
@@ -66,32 +80,48 @@ class ThreadPoolTask(TaskBase):
 
     @property
     def result(self):
+        """
+        Get the return value of the target of this task.
+
+        If the task has not yet completed, accessing this property will block
+        until it completes and a value is available.
+        """
         self._flag.wait()
         return self._result
 
-class FakeTask(object):
-    #TODO: Remove this probably
-    def execute(self):
-        pass
-    join = execute
+def _strip_tb(tb):
+    while os.path.realpath(__file__).startswith(
+            os.path.realpath(tb.tb_frame.f_code.co_filename)):
+        tb = tb.tb_next
+    return tb
 
 class AsyncTask(TaskBase):
+    """
+    Represents and manages an ongoing asynchronous function call.
+
+    An instance of this type is returned when a function with an @async decorator is called.
+    To obtain the result within an @async function, this task should be yielded, as accessing
+    the AsyncTask.result property will block until the task is complete and a result is available.
+
+    See the documentation of the @async decorator for more details.
+    """
     def __init__(self, func, args, kwargs):
         super(AsyncTask, self).__init__(func, args, kwargs)
         self._fr = repr(func)
         self.notify = EventHook()
         self.generator = ThreadsafeGenerator(func(*args, **kwargs))
-        #self._lock = RLock()
-        # launch the task
         self.__count=0
         self._result = None
         self._task = None
+        self._exc_info = None
 
-        self.execute(True)
+        # launch the task
+        self.execute()
 
-    def execute(self, first=False):
+    def execute(self):
         """
-        Called by the Dispatcher to resume execution of our generator.
+        Resume execution of our generator. In normal operation the Dispatcher calls this
+        method when needed; outside code should not need to call this method.
         """
         if self.complete: return
         # We want this to be called when our subtask is done
@@ -100,7 +130,20 @@ class AsyncTask(TaskBase):
             #log("%r on %s entering %r [%d]" % (self, cthread(), self.generator, self.__count))
             try:
                 if isinstance(self._task, TaskBase):
-                    value = self.generator.send(self._task.result)
+                    try:
+                        if hasattr(self._task, '_exc_info') and self._task._exc_info is not None:
+                            self.generator.throw(*self._task._exc_info)
+                            return
+                        else:
+                            value = self.generator.send(self._task.result)
+                    except Exception as e:
+                        log.debug("%r catching %r in complete" % (self, e))
+                        traceback.print_exc()
+                        #self._exc_info = (e, None, sys.exc_info()[2].tb_next.tb_next)
+                        self._exc_info = (e, None, _strip_tb(sys.exc_info()[2]))
+                        #self._flag.set()
+                        self.notify()
+                        return
                 else:
                     value = self.generator.next()
             except ValueError as e:
@@ -130,12 +173,19 @@ class AsyncTask(TaskBase):
 
         If the Task is not yet complete, blocks until it has completed.
         """
+        if self._exc_info:
+            log.debug("%r raising %r in result" % (self, self._exc_info))
+            raise self._exc_info[0], self._exc_info[1], self._exc_info[2]
         if self.complete: return self._result
         # This makes us go synchronous
         try:
             value = self._task
             while True:
-                value = self.generator.send(value.result)
+                try:
+                    value = self.generator.send(value.result)
+                except Exception: # doesn't catch StopIteration, which is good
+                    exc = sys.exc_info()
+                    raise exc[0], exc[1], _strip_tb(exc[2])
                 if not isinstance(value, TaskBase):
                     break
             self._result = value
@@ -174,6 +224,9 @@ class ThreadsafeGenerator:
 
     def close(self):
         return self.gen.close()
+
+    def throw(self, extype, value=None, traceback=None):
+        return self.gen.throw(extype, value, traceback)
 
 def async(f):
     def wrapper(*args, **kwargs):
