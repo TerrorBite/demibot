@@ -107,16 +107,20 @@ class AsyncTask(TaskBase):
     """
     def __init__(self, func, args, kwargs):
         super(AsyncTask, self).__init__(func, args, kwargs)
-        self._fr = repr(func)
-        self.notify = EventHook()
-        self.generator = ThreadsafeGenerator(func(*args, **kwargs))
-        self.__count=0
+        self._func_repr = repr(func)
         self._result = None
         self._task = None
         self._exc_info = None
 
-        # launch the task
-        self.execute()
+        gen = func(*args, **kwargs)
+        if not isinstance(gen, types.GeneratorType):
+            # The function we're wrapping isn't a generator, and it just ran synchronously
+            self._result = gen
+            self._flag.set()
+            self.notify() # because this is an EventHook, future subscribers will be called immediately
+        else:
+            self.generator = ThreadsafeGenerator(gen)
+            self.execute() # launch the task
 
     def execute(self):
         """
@@ -150,7 +154,6 @@ class AsyncTask(TaskBase):
                 #log("%r on %s threw %r [%d]" % (self.generator, cthread(), e, self.__count))
                 raise
             #log("%r on %s exited %r [%d]" % (self, cthread(), self.generator, self.__count))
-            self.__count += 1
             if isinstance(value, TaskBase):
                 # Task was returned, process it
                 self._task = value
@@ -200,7 +203,7 @@ class AsyncTask(TaskBase):
         self.generator.close()
 
     def __repr__(self):
-        return "<AsyncTask for %s>" % self._fr
+        return "<AsyncTask for %s>" % self._func_repr
 
 class ThreadsafeGenerator:
     """
