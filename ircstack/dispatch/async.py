@@ -2,6 +2,8 @@ import sys
 import os
 import threading
 import traceback
+import types
+import inspect
 from Queue import Queue
 
 from . import Dispatcher
@@ -90,10 +92,18 @@ class ThreadPoolTask(TaskBase):
         return self._result
 
 def _strip_tb(tb):
-    while os.path.realpath(__file__).startswith(
+    while tb is not None and os.path.realpath(__file__).startswith(
             os.path.realpath(tb.tb_frame.f_code.co_filename)):
         tb = tb.tb_next
     return tb
+
+def _with_traceback(e):
+    e.__traceback__ = _strip_tb(sys.exc_info()[2])
+    #e.__traceback__ = sys.exc_info()[2]
+    return e
+
+class WrappedException(Exception):
+    pass
 
 class AsyncTask(TaskBase):
     """
@@ -110,64 +120,58 @@ class AsyncTask(TaskBase):
         self._func_repr = repr(func)
         self._result = None
         self._task = None
-        self._exc_info = None
+        self.exception = None
 
-        gen = func(*args, **kwargs)
-        if not isinstance(gen, types.GeneratorType):
-            # The function we're wrapping isn't a generator, and it just ran synchronously
-            self._result = gen
-            self._flag.set()
-            self.notify() # because this is an EventHook, future subscribers will be called immediately
-        else:
-            self.generator = ThreadsafeGenerator(gen)
+        if inspect.isgeneratorfunction(func):
+            self.generator = ThreadsafeGenerator(func(*args, **kwargs))
             self.execute() # launch the task
+        else:
+            self.generator = None
+            self._task_complete(func(*args, **kwargs))
 
-    def execute(self):
+    def _task_complete(self, value):
+        self._result = value
+        self._task = None
+        self._flag.set()
+        self.notify()
+
+    def execute(self, notify_on_exception=True):
         """
         Resume execution of our generator. In normal operation the Dispatcher calls this
         method when needed; outside code should not need to call this method.
         """
         if self.complete: return
         # We want this to be called when our subtask is done
-        try:
-            # Call back into our child task
-            #log("%r on %s entering %r [%d]" % (self, cthread(), self.generator, self.__count))
+        #log("%r on %s entering %r [%d]" % (self, cthread(), self.generator, self.__count))
+        if isinstance(self._task, TaskBase):
             try:
-                if isinstance(self._task, TaskBase):
-                    try:
-                        if hasattr(self._task, '_exc_info') and self._task._exc_info is not None:
-                            self.generator.throw(*self._task._exc_info)
-                            return
-                        else:
-                            value = self.generator.send(self._task.result)
-                    except Exception as e:
-                        log.debug("%r catching %r in complete" % (self, e))
-                        traceback.print_exc()
-                        #self._exc_info = (e, None, sys.exc_info()[2].tb_next.tb_next)
-                        self._exc_info = (e, None, _strip_tb(sys.exc_info()[2]))
-                        #self._flag.set()
-                        self.notify()
-                        return
+                if hasattr(self._task, 'exception') and self._task.exception is not None:
+                    # Rethrow this exception in our parent task's execute()
+                    self.generator.throw(self._task.exception)
+                    return
                 else:
-                    value = self.generator.next()
-            except ValueError as e:
-                #log("%r on %s threw %r [%d]" % (self.generator, cthread(), e, self.__count))
-                raise
-            #log("%r on %s exited %r [%d]" % (self, cthread(), self.generator, self.__count))
-            if isinstance(value, TaskBase):
-                # Task was returned, process it
-                self._task = value
-                self._task.notify += self._task.method(self.execute)
-            else:
-                # Non-task was returned, treat it as a result
-                self._result = value
-                self._task = None
-                self._flag.set()
-                self.notify()
-        except StopIteration:
-            self._result = None
-            self._flag.set()
-            self.notify()
+                    value = self.generator.send(self._task.result)
+            except StopIteration:
+                self._task_complete(None)
+                return
+            except Exception as e:
+                log.debug("%r catching %r in execute()" % (self, e))
+                #traceback.print_stack(inspect.currentframe(1))
+                #traceback.print_exc()
+                self.exception = _with_traceback(e)
+                # Propagate exception via notify()
+                if notify_on_exception: self.notify()
+                return
+        else:
+            value = self.generator.next()
+        #log("%r on %s exited %r [%d]" % (self, cthread(), self.generator, self.__count))
+        if isinstance(value, TaskBase):
+            # Task was returned, process it
+            self._task = value
+            self._task.notify += self._task.method(self.execute)
+        else:
+            # Non-task was returned, treat it as a result
+            self._task_complete(value)
 
     @property
     def result(self):
@@ -176,30 +180,40 @@ class AsyncTask(TaskBase):
 
         If the Task is not yet complete, blocks until it has completed.
         """
-        if self._exc_info:
-            log.debug("%r raising %r in result" % (self, self._exc_info))
-            raise self._exc_info[0], self._exc_info[1], self._exc_info[2]
+        if self.exception:
+            # If self.exception is set then we had an exception
+            # It makes sense to rethrow that exception when an attempt is made to retrieve the result
+            log.debug("%r raising %r in result" % (self, self.exception))
+            #raise self.exception[0], self.exception[1], self.exception[2]
+            #raise self.exception
+            raise type(self.exception), self.exception, self.exception.__traceback__
         if self.complete: return self._result
         # This makes us go synchronous
+        value = self._task
         try:
-            value = self._task
             while True:
-                try:
-                    value = self.generator.send(value.result)
-                except Exception: # doesn't catch StopIteration, which is good
-                    exc = sys.exc_info()
-                    raise exc[0], exc[1], _strip_tb(exc[2])
+                # get the result of our subtask
+                result = value.result
+                # send subtask's result to our generator
+                value = self.generator.send(result)
                 if not isinstance(value, TaskBase):
+                    # A non-task was returned, so our generator is complete
                     break
-            self._result = value
         except StopIteration:
-            self._result = None
-        # tasks are complete
+            # tasks are complete but nothing was returned
+            value = None
+        except Exception as e:
+            # An exception occurred, re-raise it with filtered traceback
+            self.cancel()
+            self._flag.set()
+            #self.generator.throw(_with_traceback(e))
+            raise type(e), e, _strip_tb(sys.exc_info()[2])
+        self._result = value
         self._flag.set()
-        return self._result
+        return value
 
     def cancel(self):
-        if isinstance(self._task, TaskBase): _task.cancel()
+        if isinstance(self._task, TaskBase): self._task.cancel()
         self.generator.close()
 
     def __repr__(self):
@@ -228,8 +242,9 @@ class ThreadsafeGenerator:
     def close(self):
         return self.gen.close()
 
-    def throw(self, extype, value=None, traceback=None):
-        return self.gen.throw(extype, value, traceback)
+    def throw(self, exc):
+        traceback = exc.__traceback__ if hasattr(exc, '__traceback__') and isinstance(exc.__traceback__, types.TracebackType) else None
+        return self.gen.throw(type(exc), exc, traceback)
 
 def async(f):
     def wrapper(*args, **kwargs):

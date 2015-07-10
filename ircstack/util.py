@@ -195,6 +195,7 @@ class Hook(object):
                 target(*args, **kwargs)
             else:
                 log.debug('Target for Hook() is not callable')
+        return len(self._targets)
 
 class EventHook(Hook):
     """
@@ -209,6 +210,7 @@ class EventHook(Hook):
         if self.fired and callable(other): other()
         else: return super(EventHook,self).__iadd__(other)
     def __call__(self):
+        if self.fired: return
         self.fired = True
         #log.info(self._targets)
         return super(EventHook,self).__call__()
