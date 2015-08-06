@@ -4,6 +4,7 @@ import threading
 import traceback
 import types
 import inspect
+from functools import wraps
 from Queue import Queue
 
 from . import Dispatcher
@@ -69,12 +70,15 @@ class ThreadPoolTask(TaskBase):
         """
         if self._cancelled: return
         # Call target
-        self._result = self.target(*self.args, **self.kwargs)
+        try:
+            self._result = self.target(*self.args, **self.kwargs)
+        except SystemExit:
+            log.warn("Caught attempt to exit a threadpool thread")
         if self._cancelled: return
         
         # Run callback if it is callable
         if callable(self.callback):
-            self.callback(self.result)
+            self.callback(self._result)
 
         # Finally:
         self._flag.set()
@@ -246,9 +250,12 @@ class ThreadsafeGenerator:
         traceback = exc.__traceback__ if hasattr(exc, '__traceback__') and isinstance(exc.__traceback__, types.TracebackType) else None
         return self.gen.throw(type(exc), exc, traceback)
 
+# Async decorator
 def async(f):
+    @wraps(f)
     def wrapper(*args, **kwargs):
         return AsyncTask(f, args, kwargs)
+    wrapper.__async__ = True
     return wrapper
 
 class ThreadPool(object):
@@ -274,7 +281,7 @@ class ThreadPool(object):
         for tid in range(len(self.workers)):
             # Kill workers by making them raise SystemExit via sys.exit()
             # We simply run as many sys.exit tasks as there are workers
-            self.invoke(sys.exit)
+            self.queue.put(SystemExit)
 
     def invoke(self, target):
         """
@@ -313,10 +320,9 @@ class ThreadPoolWorker(threading.Thread):
     """
     Simple ThreadPool worker thread.
 
-    It waits on a Queue maintained by the ThreadPool for work. Work is a tuple
-    consisting of (target, args, kwargs, callback) where target is a callable,
-    args and kwargs are the arguments to call target with, and callback is an
-    optional (may be None) callback method.
+    It waits on a Queue maintained by the ThreadPool for work. Work is either
+    a ThreadPoolTask instance, or SystemExit which is used as a special value
+    to indicate that this thread should exit.
     """
     log = get_logger()
 
@@ -331,8 +337,9 @@ class ThreadPoolWorker(threading.Thread):
         self.log.debug('%s now waiting for work' % self.name)
         while True:
             # Block on queue.get() until work arrives, then execute work
-            self.queue.get().execute()
-
+            task = self.queue.get()
+            if task is SystemExit: raise SystemExit()
+            if task: task.execute()
 
 class DispatchThreadPool(ThreadPool):
     
