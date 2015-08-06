@@ -5,6 +5,7 @@
 __all__ = ['IRCConnection', 'IRCSocketManager', 'NoValidAddressError']
 
 # Python imports
+import sys
 import errno
 import random
 import socket
@@ -17,6 +18,7 @@ from ircstack.util import get_logger
 log = get_logger(__name__)
 
 # ircstack imports
+from ircstack._23support import unicode, str
 from ircstack.util import hrepr, namedtuple, Hooks
 from ircstack.dispatch.async import AsyncDelayed, SyncRepeating, Sync
 import ircstack.dispatch.events as events
@@ -418,6 +420,7 @@ class IRCMessage(object):
             message = self.encoder.encode_utf8(params[-1])
             text = '{0} {1}{2}'.format(text, ':' if ' ' in message else '', message)
         return text.translate(None, '\0\r\n')
+    __bytes__ = __str__
 
     def __unicode__(self):
         "Return a unicode string representation of the raw IRC message."
@@ -428,6 +431,7 @@ class IRCMessage(object):
             message = params[-1]
             text = u'%s %s%s' % (text, u':' if u' ' in message else u'', message)
         return text.translate({u'\0': None, u'\r': None, u'\n': None})
+    __str__ = __unicode__ if sys.version_info[0]==3 else __str__
 
     def __add__(self, other):
         """
@@ -545,7 +549,7 @@ class IRCEncoder(object):
     def __init__(self, fallback='iso-8859-1', utf8=True, server='iso-8859-1'):
         # Encoding for server protocol. Should almost always be ISO-8859-1.
         try:
-            ''.decode(server)
+            b''.decode(server)
         except LookupError:
             # Invalid encoding provided, default to iso-8859-1
             server='iso-8859-1'
@@ -558,7 +562,7 @@ class IRCEncoder(object):
         # Fallback encoding to use if UTF-8 decoding fails.
         # If utf8 is false, we always use the fallback encoding.
         try:
-            ''.decode(fallback)
+            b''.decode(fallback)
         except LookupError:
             # Invalid encoding provided, default to iso-8859-1
             fallback='iso-8859-1'

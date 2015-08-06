@@ -1,4 +1,6 @@
 # Python imports
+from __future__ import print_function
+
 import sys
 import weakref
 import traceback
@@ -41,6 +43,13 @@ def event_handler(event_class, **params):
     ...     pass
     >>> register = event_handler(EventClass, parameter)
     >>> func = register(func)
+
+    which is semantically identical to:
+
+    >>> def func():
+    ...     pass
+    ... EventClass.subscribe(func, parameter)
+
     """
     import inspect
     
@@ -56,8 +65,8 @@ def event_handler(event_class, **params):
         if context != "<module>":
             # This function is an unbound instance method, act accordingly
             # (note that we receive the actual function, not an unbound method wrapper)
-            print "@Dispatcher.event_handler(%s) detected on %s.%s() instance method (%s)" % \
-                    (event_class.__name__, context, func.__name__, repr(func))
+            print( "@Dispatcher.event_handler(%s) detected on %s.%s() instance method (%s)" % \
+                    (event_class.__name__, context, func.__name__, repr(func)) )
             #log.warn('@Dispatcher.event_handler() was used on an "%s" instance method, ignoring!' % context)
 
             # store handler information for later use
@@ -91,7 +100,7 @@ class EventListener(object):
         self._bound_handlers = {}
 
         # Locate the class functions that were marked by @event_handler
-        handlers = tuple(f for f in self.__class__.__dict__.itervalues() if type(f) is types.FunctionType and hasattr(f, 'handler'))
+        handlers = tuple(f for f in self.__class__.__dict__.values() if type(f) is types.FunctionType and hasattr(f, 'handler'))
 
         for func in handlers:
             event = func.handler.event
@@ -117,7 +126,7 @@ class EventListener(object):
         Calls <EventType>.unsubscribe() on the list of handlers saved by the subscribe_all() method.
         If the handlers were already unsubscribed, the list will be empty.
         """
-        for func, handler in self._bound_handlers.iteritems():
+        for func, handler in self._bound_handlers.items():
             func.handler.event.unsubscribe(handler)
         self._bound_handlers = {}
 
@@ -177,8 +186,10 @@ class EventType(type):
         cls.subscribers = weakref.WeakKeyDictionary()
         super(EventType, cls).__init__(name, bases, d)
 
-class EventBase(object):
-    __metaclass__ = EventType # more magic
+EventBaseMeta = EventType('EventBaseMeta', (), {}) # Python 2/3 compat magic
+
+class EventBase(EventBaseMeta):
+    #__metaclass__ = EventType # more magic (python 2 only though)
     """
     Base class for all events. All other Event classes should inherit from this one, and
     specify properties as appropriate.
@@ -201,7 +212,7 @@ class EventBase(object):
         # while we are still iterating over the subscribers list. We solve this
         # by storing the list of strong references while iterating.
         refs = self.__class__.subscribers.items()
-        for func, params in self.__class__.subscribers.iteritems():
+        for func, params in self.__class__.subscribers.items():
             if not func:
                 self.log.warn("Dead weakref detected!")
                 continue

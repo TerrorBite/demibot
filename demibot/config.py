@@ -148,7 +148,7 @@ class NetworkConfig(YAMLConfigObject):
 
         if not channels:
             log.warn("Network %s has no configured channels!" % name)
-        for cname, channel in channels.iteritems():
+        for cname, channel in channels.items():
             if isinstance(channel, dict):
                 self.channels[cname] = NetworkChannelConfig(**channel)
             else:

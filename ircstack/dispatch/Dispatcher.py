@@ -16,7 +16,12 @@ from __future__ import with_statement # for Python 2.5
 
 # Python imports
 import threading
-from Queue import Queue, Empty as QueueEmpty
+try:
+    # Python 2.6
+    from Queue import Queue, Empty as QueueEmpty
+except ImportError:
+    # Python 3
+    from queue import Queue, Empty as QueueEmpty
 from time import time
 from heapq import *
 
@@ -152,7 +157,7 @@ def _run():
         try:
             # Block until work arrives or timeout, whichever comes first
             work = inputq.get(True, timeout)
-        except QueueEmpty, e:
+        except QueueEmpty as e:
             # Timeout means that we have a scheduled task due to be completed.
             # Jump back to the top of the loop where we call _process_tasks()
             continue
@@ -167,7 +172,7 @@ def _run():
         if callable(work):
             try:
                 work()
-            except Exception, e:
+            except Exception as e:
                 log.exception("Exception occurred while dispatching event")
         else: log.debug("Dispatcher got non-callable %r" % work)
 

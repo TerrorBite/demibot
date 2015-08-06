@@ -179,7 +179,7 @@ class Plugin(object):
         """
         subs = self.subscriptions.copy()
         # Work with a copy so we don't modify the list while iterating
-        for func, event in subs.iteritems():
+        for func, event in subs.items():
             event.unsubscribe(func)
         self.subscriptions = {}
 

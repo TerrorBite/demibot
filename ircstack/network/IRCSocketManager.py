@@ -38,11 +38,11 @@ class SockSignal:
 
     def set(self):
         self.log.debug("Setting SockSignal")
-        self._write.send('\0')
+        self._write.send(b'\0')
     def reset(self):
         try:
             self.signal.recv(1)
-        except socket.error, e:
+        except socket.error as e:
             if e.errno != errno.EAGAIN:
                 self.log.exception("Socket error in SockSignal: This shouldn't happen!", e)
             pass
@@ -248,7 +248,7 @@ def _run():
     # Shutdown procedure
     sig.reset()
     epoll.close()
-    for socket in fdmap.itervalues():
+    for socket in fdmap.values():
         socket.close()
     fdmap = {}
     log.info('IRCSocketManager shut down cleanly.')

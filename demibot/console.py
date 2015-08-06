@@ -3,6 +3,8 @@ import struct, sys, fcntl, termios
 import signal, readline, threading, logging
 import time
 
+from ircstack._23support import unicode,str
+
 # Set up logging
 from ircstack.util import get_logger
 log = get_logger(__name__)
@@ -63,7 +65,7 @@ def run():
         except KeyboardInterrupt:
             IRCBot().quit_networks('Got Ctrl-C')
             break
-        except SystemExit, e:
+        except SystemExit as e:
             IRCBot().quit_networks(unicode(e))
             break
         except Exception:

@@ -13,10 +13,10 @@ This software makes use of Python features and libraries that are only available
 """
 
 # Will break hilariously under Python 3.x (even some of the syntax is invalid)
-assert sys.version_info < (3, 0), """
-Unsupported Python version!
-This software was written for Python 2.x and breaks if run under Python 3. Sorry!
-"""
+#assert sys.version_info < (3, 0), """
+#Unsupported Python version!
+#This software was written for Python 2.x and breaks if run under Python 3. Sorry!
+#"""
 
 from ircstack.util import get_logger, catch_all, Singleton
 log = get_logger()

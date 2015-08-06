@@ -314,7 +314,7 @@ class catch_all(object):
                 try:
                     # Run the wrapped function until it exits or throws an exception
                     return func(*args, **kwargs)
-                except Exception, e:
+                except Exception as e:
                     # First check if this exception is the same type as the
                     # last one the wrapped function threw (if any)
                     if type(e)==extype:
@@ -423,8 +423,8 @@ def _readable(num):
     nadj1, nadj2, nanimals = [len(x) for x in _rdata]
 
     animal = num % nanimals
-    adj2 = (num/nanimals + animal) % nadj2
-    adj1 = (num/(nanimals*nadj2) + adj2 + animal) % nadj1
+    adj2 = (num//nanimals + animal) % nadj2
+    adj1 = (num//(nanimals*nadj2) + adj2 + animal) % nadj1
 
     #num2 = adj1*nadj2*nanimals + adj2*nanimals + animal
 
@@ -443,11 +443,11 @@ def _set_proc_name(newname):
     from ctypes import cdll, byref, create_string_buffer
     libc = cdll.LoadLibrary('libc.so.6')
     buff = create_string_buffer(len(newname)+1)
-    buff.value = newname
+    buff.value = newname.encode('utf-8')
     libc.prctl(15, byref(buff), 0, 0, 0)
 
 def set_thread_name(func):
     def wrapper(*args, **kwargs):
-        _set_proc_name(threading.current_thread().name)
+        _set_proc_name(str(threading.current_thread().name))
         func(*args, **kwargs)
     return wrapper

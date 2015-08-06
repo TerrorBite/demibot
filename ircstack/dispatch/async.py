@@ -5,7 +5,10 @@ import traceback
 import types
 import inspect
 from functools import wraps
-from Queue import Queue
+try:
+    from Queue import Queue # Python 2.6
+except ImportError:
+    from queue import Queue # Python 3.x
 
 from . import Dispatcher
 
@@ -106,6 +109,14 @@ def _with_traceback(e):
     #e.__traceback__ = sys.exc_info()[2]
     return e
 
+def _raise(exc):
+    if sys.version_info >= (3, 0):
+        raise exc
+    else:
+        exec(compile("raise type(exc), exc, exc.__traceback__", '<raise>', 'exec'+
+            ''### Async stack trace begins here ###
+            ))
+
 class WrappedException(Exception):
     pass
 
@@ -160,8 +171,6 @@ class AsyncTask(TaskBase):
                 return
             except Exception as e:
                 log.debug("%r catching %r in execute()" % (self, e))
-                #traceback.print_stack(inspect.currentframe(1))
-                #traceback.print_exc()
                 self.exception = _with_traceback(e)
                 # Propagate exception via notify()
                 if notify_on_exception: self.notify()
@@ -188,9 +197,8 @@ class AsyncTask(TaskBase):
             # If self.exception is set then we had an exception
             # It makes sense to rethrow that exception when an attempt is made to retrieve the result
             log.debug("%r raising %r in result" % (self, self.exception))
-            #raise self.exception[0], self.exception[1], self.exception[2]
-            #raise self.exception
-            raise type(self.exception), self.exception, self.exception.__traceback__
+            #raise type(self.exception), self.exception, self.exception.__traceback__
+            _raise(self.exception) # Re-raise exception caught in async code
         if self.complete: return self._result
         # This makes us go synchronous
         value = self._task
@@ -211,7 +219,8 @@ class AsyncTask(TaskBase):
             self.cancel()
             self._flag.set()
             #self.generator.throw(_with_traceback(e))
-            raise type(e), e, _strip_tb(sys.exc_info()[2])
+            #raise type(e), e, _strip_tb(sys.exc_info()[2]) # Python 2
+            _raise(_with_traceback(e)) # Python 2/3 compat
         self._result = value
         self._flag.set()
         return value

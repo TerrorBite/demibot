@@ -4,7 +4,10 @@ High-level IRC protocol handling.
 """
 
 # Python imports
-import urlparse
+try:
+    import urlparse
+except ImportError:
+    import urllib.parse as urlparse # Python 3
 import itertools
 import socket
 
@@ -36,7 +39,7 @@ class handles(object):
     def __init__(self, *commands):
         self.commands = []
         for cmd in commands:
-            if isinstance(cmd, str):
+            if hasattr(cmd, 'decode') and callable(cmd.decode):
                 cmd = cmd.decode('utf-8')
             if isinstance(cmd, int):
                 cmd = u"%03d" % cmd
@@ -118,14 +121,14 @@ class IRCServerList(object):
         while True:
             self.log.debug("Fetching next address")
             try:
-                address = self.addresses.next()
+                address = self.addresses.__next__() if hasattr(self.addresses, '__next__') else self.addresses.next()
                 break
             except StopIteration:
                 # We've run out of addresses to connect to for the current server
                 # Try the next server in the list
                 self.log.debug("No addresses left, fetching next server")
                 try:
-                    self.current_server = self.servers.next()
+                    self.current_server = self.servers.__next__() if hasattr(self.servers, '__next__') else self.servers.next()
                 except StopIteration:
                     # No servers are left
                     self.log.error('Connection request failed: No more servers to connect to')
@@ -156,7 +159,8 @@ class IRCServerList(object):
                         elif self.only_preferred:
                             self.addresses = (x for x in ip4list) if self.prefer_ipv4 else (x for x in ip6list)
                         else:
-                            self.addresses = (x for x in ip4list+ip6list) if self.prefer_ipv4 else (x for x in ip6list+ip4list)
+                            self.addresses = (x for x in list(ip4list)+list(ip6list)) if self.prefer_ipv4 \
+                                else (x for x in list(ip6list)+list(ip4list))
                         # jump to top to fetch first address
                         continue
         # attempt successful connection
@@ -167,7 +171,7 @@ class IRCServerList(object):
         self.log.info('Resolving address {0.host}:{0.port}'.format(server)) 
         try:
             addrinfo = socket.getaddrinfo(*server.address)
-        except socket.error, e:
+        except socket.error as e:
             if e[0] == errno.ENOENT:
                 # Hostname does not exist
                 self.log.warn('Host not found resolving {0}'.format(server.host))

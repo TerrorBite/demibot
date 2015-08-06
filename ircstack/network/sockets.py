@@ -468,7 +468,7 @@ class ThrottleWorker(threading.Thread):
         Called when a buffer which we hold a weak reference to is garbage collected.
         This allows us to remove it from our collection.
         """
-        for key in [k for k, ref in self.items.iteritems() if ref is buf]:
+        for key in [k for k, ref in self.items.items() if ref is buf]:
             del self.items[key]
     
     @catch_all(retry=False)
